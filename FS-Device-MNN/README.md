@@ -8,6 +8,8 @@
 [![Playground](https://shields.io/badge/JupyterLab-Enjoy%20Your%20FL%20Journey!-F37626?logo=jupyter)](https://try.federatedscope.io/)
 [![Contributing](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://federatedscope.io/docs/contributor/)
 
+**This repo contains the *Server* of our proposed FS-Real system, which is built upon FederatedScope platform and enhanced for real-world cross-device FL, see more detailed in our [FS-Real_paper](link_to_be_added).**
+
 FederatedScope is a comprehensive federated learning platform that provides convenient usage and flexible customization for various federated learning tasks in both academia and industry.  Based on an event-driven architecture, FederatedScope integrates rich collections of functionalities to satisfy the burgeoning demands from federated learning, and aims to build up an easy-to-use platform for promoting learning safely and effectively.
 
 A detailed tutorial is provided on our website: [federatedscope.io](https://federatedscope.io/)
