@@ -1,0 +1,3 @@
+[submodule "AttentiveNAS"]
+	path = AttentiveNAS
+	url = https://github.com/variant-star/AttentiveNAS.git
