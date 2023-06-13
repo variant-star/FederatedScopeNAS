@@ -15,4 +15,4 @@ def call_my_scheduler(optimizer, reg_type):
         return scheduler
 
 
-register_scheduler('myscheduler', call_my_scheduler)
+# register_scheduler('myscheduler', call_my_scheduler)
