@@ -10,23 +10,24 @@ use_gpu: True
 use_amp: True
 
 public_data:
-  annotated: False
+  annotated: True
 
 ensemble_distillation:
-  enable: False
+  enable: true
   type: "avg_logits"  # "avg_logits"
 
 inplace_distillation:
   enable: True
   type: "reverse" # "normal" or "reverse"
 
-# if inplace_distillation.enable: {
-#     get: inplace_logits
-#
-# }
+overwrite_supernet_with_aggregation: True
+freeze_teacher_subnet:
+  enable: false
+  round_after: 361
 
-
-overwrite_supernet_with_aggregation: False
+server_model_bn_tracking: false
+#ensemble_model_bn_tracking: false
+supernet_bn_tracking: false
 
 device: 0
 #early_stop:
@@ -50,7 +51,7 @@ personalization:
   share_non_trainable_para: true # TODO(Variant): True
 data:
   root: data/
-  type: cifar100
+  type: cifar10
   splits: [0.8, 0., 0.2]  # TODO(Variant)
   splitter: lda
   splitter_args:
@@ -84,7 +85,7 @@ train:
   batch_or_epoch: epoch
   optimizer:
     type: patchSGD
-    lr: 0.1  # TODO(Variant): 0.01
+    lr: 0.1
     weight_decay: 0.0005
     weight_decay_bn_bias: 0.
   scheduler:
@@ -97,6 +98,7 @@ grad:
   grad_clip: 1.0
 criterion:
   type: balanced_softmax # CrossEntropyLoss, balanced_ce
+#  label_smoothing: 0
 #  beta: 0.9
 #  fl_gamma: 2.0
 trainer:
@@ -128,10 +130,12 @@ server_trainer_specified:
   train:
     round_after: 361
     batch_or_epoch: epoch
-    local_update_steps: 5
+    local_update_steps: 1
     optimizer:
       type: patchSGD
       lr: 0.1 # origin: 0.01
+      momentum: 0.9
+      nesterov: True
       weight_decay: 0.00001
       weight_decay_bn_bias: 0.
     scheduler:
@@ -141,12 +145,12 @@ server_trainer_specified:
       clamp_lr: 0.
       warmup_factor: 0.0001
   grad:
-    grad_clip: 1.0  # TODO(Variant): not sure
+    grad_clip: 1.0
   eval:
     freq: 1
     metrics: ['acc'] #, 'avg_loss'
     monitoring: []
-    split:  ['test']  # for 'train' split, it has train_transform
+    split:  ['test', 'val', 'train']  # for 'train' split, it has train_transform, "val" is prepared for bn recalibration
     best_res_update_round_wise_key: 'test_acc'
     report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
 
@@ -156,7 +160,7 @@ supernet_trainer_specified:
   trainer:
     type: ensemble_distillation_trainer
   criterion:
-    type: alpha_divergence  # alpha_divergence,
+    type: alpha_divergence  # alpha_divergence, KLDivLoss,
   regularizer:
     mu: 0.0
     type: ''
@@ -169,13 +173,13 @@ supernet_trainer_specified:
   train:
     round_after: 0  # TODO(Variant):
     batch_or_epoch: epoch
-    local_update_steps: 5  # TODO(Variant)
+    local_update_steps: 1  # TODO(Variant)
     optimizer:
       type: patchSGD
-      lr: 0.1 # origin: 0.1
+      lr: 0.1 # origin: 0.1 # TODO(Variant)
       momentum: 0.9
-#      nesterov: True
-      weight_decay: 0.00001
+      nesterov: True
+      weight_decay: 0.00001  # TODO(Variant): 0.00001
       weight_decay_bn_bias: 0.
     scheduler:
       type: warmup_cosine_scheduler
@@ -184,18 +188,18 @@ supernet_trainer_specified:
       clamp_lr: 0.
       warmup_factor: 0.0001
   grad:
-    grad_clip: 5.0  # TODO(Variant): not sure
+    grad_clip: 1.0  # TODO(Variant): not sure
   eval:
     freq: 1
     metrics: ['acc'] #, 'avg_loss'
     monitoring: []
-    split: ['test']  # for 'train' split, it has train_transform
+    split: ['test', 'train']  # for 'train' split, it has train_transform
     best_res_update_round_wise_key: 'test_acc'
     report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
 
 
   supernet_arch_sampler:
-    num_arch_training: 4 # TODO(Variant): for debug
+    num_arch_training: 4
     method: 'bestup'
     arch_to_flops_map_file_path: './attentive_nas_data/flops_archs_off_table.map'
     discretize_step: 25

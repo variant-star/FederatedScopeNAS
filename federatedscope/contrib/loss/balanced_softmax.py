@@ -13,7 +13,7 @@ class BalancedSoftmax(torch.nn.modules.loss._Loss):
         super(BalancedSoftmax, self).__init__()
         self.samples_per_class = samples_per_class
 
-    def forward(self, logits, labels, samples_per_class=None):
+    def forward(self, logits, labels, samples_per_class=None, label_smoothing=0):
         """
         Compute the Balanced Softmax Loss between `logits` and the ground truth `labels`.
         Args:
@@ -40,7 +40,7 @@ class BalancedSoftmax(torch.nn.modules.loss._Loss):
         spc = spc.unsqueeze(0).expand(batch_size, -1)
         logits = logits + spc.log()
 
-        return F.cross_entropy(input=logits, target=labels)
+        return F.cross_entropy(input=logits, target=labels, label_smoothing=label_smoothing)
 
 
 def call_my_criterion(type, device):

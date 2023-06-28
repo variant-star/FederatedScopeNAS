@@ -6,6 +6,8 @@ import torchvision.datasets as datasets
 from federatedscope.register import register_data
 from federatedscope.core.data.base_translator import BaseDataTranslator
 
+import copy
+
 
 def build_transforms(dataset, autoaugment=False, random_erase=False, cutout=False):
     if dataset.lower() == 'cifar10':
@@ -68,17 +70,29 @@ def load_cifar_data(config, client_cfgs=None):
     translator = BaseDataTranslator(config, client_cfgs)
 
     # 构建server端unlabeled data，剩余部分用于划分给所有clients
-    all_clients_train_dataset, _, server_unlabeled_dataset = translator.split_train_val_test(raw_train_dataset, config)
-    fs_data = translator((all_clients_train_dataset, raw_test_dataset, []))
+    all_clients_train_dataset, _, server_dataset = translator.split_train_val_test(raw_train_dataset, config)
+    fs_data = translator((all_clients_train_dataset, [], raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
 
     from federatedscope.core.data import ClientData
     from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
-    from copy import deepcopy
-    fs_data[0] = ClientData(config, train=server_unlabeled_dataset, val=raw_test_dataset, test=raw_test_dataset)  #
+    bn_recalibration_dataset = copy.deepcopy(server_dataset)  # val_dataset is used to calibrate bn. it is actually train set.
+    # bn_recalibration_dataset.dataset.transform = train_transforms  # not necessary, it is originally with train_transform
+    fs_data[0] = ClientData(config, train=server_dataset, val=bn_recalibration_dataset, test=raw_test_dataset)
+
+    # # TODO(Variant): for debug
+    # clone_raw_test_dataset = copy.deepcopy(raw_test_dataset)
+    # clone_raw_test_dataset.transform = train_transforms
+    # fs_data[0] = ClientData(config, train=clone_raw_test_dataset, val=raw_test_dataset, test=raw_test_dataset)
+
+    # # # TODO(Variant): for debug
+    # server_dataset.dataset.transform = test_transforms
+    # raw_test_dataset.transform = train_transforms
+    # fs_data[0] = ClientData(config, train=raw_test_dataset, val=server_dataset, test=server_dataset)
+
     for client_id in range(1, config.federate.client_num + 1):
-        fs_data[client_id].test_data = deepcopy(fs_data[0].test_data)
+        fs_data[client_id].val_data = copy.deepcopy(server_dataset)  # the bn_recalibration_dataset(server data)
         # fs_data[client_id].setup(config)  # NOTE(Variant): config not change, so setup() func not work.
-        fs_data[client_id]['test'] = get_dataloader(fs_data[client_id].test_data, config, 'test')
+        fs_data[client_id]['val'] = get_dataloader(fs_data[client_id].val_data, config, 'val')
 
     return fs_data, config.clone()
 

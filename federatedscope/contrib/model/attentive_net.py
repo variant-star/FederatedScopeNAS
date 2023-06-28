@@ -21,7 +21,7 @@ def call_attentive_net(model_config, input_shape):
         from AttentiveNAS.utils.config import setup
         cfg = setup(attentive_yaml)
         cfg.n_classes = model_config.get("n_classes", 10)
-        cfg.bn_momentum = model_config.get("bn_momentum", 0)
+        cfg.bn_momentum = model_config.get("bn_momentum", 0.1)
         cfg.bn_eps = model_config.get("bn_eps", 1e-5)
         cfg.drop_out = model_config.get("drop_out", 0)
         cfg.drop_connect = model_config.get("drop_connect", 0)

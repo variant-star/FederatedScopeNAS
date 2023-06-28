@@ -100,6 +100,15 @@ class NASServer(Server):
         self.train_server_model_after_round = self.server_trainer_specified_cfg.train.round_after
         self.train_supernet_after_round = self.supernet_trainer_specified_cfg.train.round_after
 
+        if self._cfg.server_model_bn_tracking:
+            for m in self.model.modules():  # TODO(Variant):
+                if isinstance(m, torch.nn.BatchNorm2d) or isinstance(m, torch.nn.BatchNorm1d):
+                    m.track_running_stats = False
+        if self._cfg.supernet_bn_tracking:
+            for m in self.supernet.modules():  # TODO(Variant):
+                if isinstance(m, torch.nn.BatchNorm2d) or isinstance(m, torch.nn.BatchNorm1d):
+                    m.track_running_stats = False
+
     def get_cur_state(self):
         return self.state
 
@@ -139,6 +148,7 @@ class NASServer(Server):
                 # Receiving enough feedback in the training process
                 aggregated_num = self._perform_federated_aggregation()
 
+                # self.eval_server_model(DISPLAY="Server Model(agg)(MODE.TEST)(before train)")
                 # TODO(Variant): ---------------------------------------------------------------------------------------
                 # execute distillation for server model
                 if self.state >= self.train_server_model_after_round:
@@ -158,6 +168,13 @@ class NASServer(Server):
                 torch.save({'cur_round': self.state, 'model': self.models[0].state_dict()},
                            os.path.join(self._cfg.outdir, f"server_model.pth"))
 
+                # evaluate server model
+                # self.eval_server_model(DISPLAY="Server Model(agg)(MODE.TRAIN)", mode=MODE.TRAIN)
+                self.eval_server_model(DISPLAY="Server Model(agg)(MODE.TEST)")
+
+                # # evaluate ensemble models
+                # self.eval_ensemble_model()
+
                 # load server model into supernet
                 if self._cfg.overwrite_supernet_with_aggregation:
                     self.supernet.load_weights_from_pretrained_submodel(self.models[0])
@@ -170,7 +187,7 @@ class NASServer(Server):
                     train_log_res = self._supernet_monitor.format_eval_res(
                         results,
                         rnd=self.state,
-                        role='Server Supernet #{}'.format(self.ID),
+                        role='Server Supernet(teacher) #{}'.format(self.ID),
                         return_raw=True)
                     logger.info(train_log_res)
                     if self._cfg.wandb.use and self._cfg.wandb.server_train_info:
@@ -179,6 +196,12 @@ class NASServer(Server):
                     # save server model
                     torch.save({'cur_round': self.state, 'model': self.supernet.state_dict()},
                                os.path.join(self._cfg.outdir, f"supernet.pth"))
+
+                # decouple the min subnet from supernet
+                if self._cfg.overwrite_supernet_with_aggregation:
+                    self.supernet.sample_min_subnet()
+                    decoupled_state_dict = self.supernet.get_active_subnet(preserve_weight=True).state_dict()
+                    self.model.load_state_dict(decoupled_state_dict)
 
                 # TODO(Variant): ---------------------------------------------------------------------------------------
 
@@ -223,16 +246,13 @@ class NASServer(Server):
 
         return move_on_flag
 
-    def eval(self):
-        """
-        To conduct evaluation. When ``cfg.federate.make_global_eval=True``, \
-        a global evaluation is conducted by the server.
-        """
-        from federatedscope.core.auxiliaries.utils import merge_dict_of_results
-
+    def distributed_client_eval(self):
         # send 'evaluation' cmd to clients
         self.broadcast_model_para(msg_type='evaluate_ignore_received_param',
                                   filter_unseen_clients=False)
+
+    def eval_server_model(self, DISPLAY="Server Model", mode=MODE.TEST):
+        from federatedscope.core.auxiliaries.utils import merge_dict_of_results
 
         # evaluate server model
         for i in range(self.model_num):
@@ -240,13 +260,13 @@ class NASServer(Server):
             metrics = {}
             for split in self.server_trainer_specified_cfg.eval.split:
                 eval_metrics = self.trainers[i].evaluate(
-                    target_data_split_name=split)
+                    target_data_split_name=split, mode=mode)  # TODO(Variant): important!
                 metrics.update(**eval_metrics)
 
             formatted_eval_res = self._monitor.format_eval_res(
                 metrics,
                 rnd=self.state,
-                role='Server Model #',
+                role=f'{DISPLAY} #',
                 forms=self.server_trainer_specified_cfg.eval.report,
                 return_raw=True)
 
@@ -263,60 +283,113 @@ class NASServer(Server):
             # torch.save({'cur_round': self.state, 'model': self.models[i].state_dict()},
             #            os.path.join(self._cfg.outdir, f"server_model[i].pth"))
 
+    def eval_supernet(self, DISPLAY="Server Supernet", spec_subnet=["max", "random", "min"], mode=MODE.TEST):
         # evaluate supernet model
-        if self.state >= 0:  # for debug
-            # self.supernet_trainer.ctx.model.sample_min_subnet()  # TODO(Variant): 测试是否是max subnet的原因'
-            for sample_net, header in [
-                (self.supernet_trainer.ctx.model.sample_max_subnet, "max"),
-                (self.supernet_trainer.ctx.model.sample_active_subnet, "random"),
-                (self.supernet_trainer.ctx.model.sample_min_subnet, "min"),
-            ]:
-                sample_net()
+        header_to_sample = {
+            "max": self.supernet_trainer.ctx.model.sample_max_subnet,
+            "random": self.supernet_trainer.ctx.model.sample_active_subnet,
+            "min": self.supernet_trainer.ctx.model.sample_min_subnet
+        }
 
-                metrics = {}
-                for split in self.supernet_trainer_specified_cfg.eval.split:
-                    eval_metrics = self.supernet_trainer.evaluate(
-                        target_data_split_name=split, mode=MODE.TRAIN)  # supernet does not support 'eval' mode.
-                    # supernet bn_momentum is set to 0, so the bn statistics will not be calculated.
-                    # # and DynamicBN only supports BN
-                    metrics.update(**eval_metrics)
+        for header in spec_subnet:
+            header_to_sample[header]()
 
-                formatted_eval_res = self._supernet_monitor.format_eval_res(
-                    metrics,
-                    rnd=self.state,
-                    role=f'Server Supernet({header}) #',
-                    forms=self.supernet_trainer_specified_cfg.eval.report,
-                    return_raw=True)
+            metrics = {}
+            for split in self.supernet_trainer_specified_cfg.eval.split:
+                eval_metrics = self.supernet_trainer.evaluate(
+                    target_data_split_name=split, mode=mode)  # supernet does not support 'eval' mode.
+                # supernet bn_momentum is set to 0, so the bn statistics will not be calculated.
+                # # and DynamicBN only supports BN
+                metrics.update(**eval_metrics)
 
-                self._supernet_monitor.save_formatted_results(formatted_eval_res)
-                logger.info(formatted_eval_res)
+            formatted_eval_res = self._supernet_monitor.format_eval_res(
+                metrics,
+                rnd=self.state,
+                role=f'{DISPLAY}({header}) #',
+                forms=self.supernet_trainer_specified_cfg.eval.report,
+                return_raw=True)
+
+            self._supernet_monitor.save_formatted_results(formatted_eval_res)
+            logger.info(formatted_eval_res)
+
+            # # save supernet model
+            # torch.save({'cur_round': self.state, 'model': self.supernet.state_dict()},
+            #            os.path.join(self._cfg.outdir, f"supernet.pth"))
+
+    def eval_supernet_with_recalibrate_bn(self, DISPLAY="Server Supernet", spec_subnet=["max", "random", "min"]):
+        # evaluate supernet model
+        header_to_sample = {
+            "max": self.supernet_trainer.ctx.model.sample_max_subnet,
+            "random": self.supernet_trainer.ctx.model.sample_active_subnet,
+            "min": self.supernet_trainer.ctx.model.sample_min_subnet
+        }
+
+        for header in spec_subnet:
+
+            metrics = {}
+
+            header_to_sample[header]()
+
+            subnet = self.supernet_trainer.ctx.model.get_active_subnet(preserve_weight=True)
+            subnet.cuda()  # TODO(Variant): simply writing
+
+            # re-calibrate-bn
+            recalibrate_bn(subnet,
+                           bn_recalibrate_bn_loader=self.trainer.ctx.get("train_loader"),
+                           num_batch_per_epoch=getattr(self.trainer.ctx, f"num_train_batch"))
+
+            # start eval subnet
+            for split in self.supernet_trainer_specified_cfg.eval.split:
+                eval_one_epoch(subnet,
+                               data_loader=self.trainer.ctx.get(f"{split}_loader"),
+                               num_batch_per_epoch=getattr(self.trainer.ctx, f"num_{split}_batch"),
+                               split=split, metrics=metrics,
+                               **{"use_amp": self._cfg.use_amp})
+
+            formatted_eval_res = self._supernet_monitor.format_eval_res(
+                metrics,
+                rnd=self.state,
+                role=f'{DISPLAY}({header})w/cali_bn #',
+                forms=self.supernet_trainer_specified_cfg.eval.report,
+                return_raw=True)
+
+            self._supernet_monitor.save_formatted_results(formatted_eval_res)
+            logger.info(formatted_eval_res)
 
             # # save server model
             # torch.save({'cur_round': self.state, 'model': self.supernet.state_dict()},
             #            os.path.join(self._cfg.outdir, f"supernet.pth"))
 
-        # evaluate ensemble model
-        server_test_loader = self.trainers[0].ctx.get("test_loader")
-        server_test_loader.reset()
+    def eval_ensemble_model(self, DISPLAY="Ensemble Model"):
+        formatted_results = {'Role': f'{DISPLAY} #', 'Round': self.state, 'Results_raw': {}}
+        for split in self.server_trainer_specified_cfg.eval.split:
+            # evaluate ensemble model
+            eval_one_epoch(self.cached_client_models[0],
+                           data_loader=self.trainer.ctx.get(f"{split}_loader"),
+                           num_batch_per_epoch=getattr(self.trainer.ctx, f"num_{split}_batch"),
+                           split=split,
+                           metrics=formatted_results['Results_raw'],
+                           forward_func=calculate_ensemble_logits,
+                           **{"use_amp": self._cfg.use_amp,
+                              "distillation_logits_type": self._cfg.ensemble_distillation.type})
 
-        y_true, y_pred = [], []
-        for batch_i in range(getattr(self.trainer.ctx, f"num_test_batch")):
-            inputs, labels = next(server_test_loader)
-            inputs, labels = inputs.to(torch.device("cuda:0")), labels.to(torch.device("cuda:0"))  # TODO(Variant): 偷懒写法
-
-            y_logits = calculate_ensemble_logits(inputs, self.cached_client_models[0], self._cfg.use_amp, self._cfg.ensemble_distillation.type)
-
-            y_true.append(labels.cpu().numpy())
-            y_pred.append(np.argmax(y_logits.cpu().numpy(), axis=-1))
-
-        y_true = np.concatenate(y_true)
-        y_pred = np.concatenate(y_pred)
-
-        formatted_results = {'Role': 'Ensemble Model #', 'Round': self.state, 'Results_raw':{
-            'test_acc': np.sum(y_true == y_pred) / len(y_true), 'test_total': len(y_true),}}
         logger.info(formatted_results)
         with open(os.path.join(self._cfg.outdir, "eval_results.raw"), "a") as outfile:
             outfile.write(str(formatted_results) + "\n")
+
+    def eval(self):
+        """
+        To conduct evaluation. When ``cfg.federate.make_global_eval=True``, \
+        a global evaluation is conducted by the server.
+        """
+        self.distributed_client_eval()
+
+        # self.eval_server_model()
+
+        # self.eval_supernet(mode=MODE.TRAIN)
+        self.eval_supernet_with_recalibrate_bn()  # TODO(Variant): important!
+
+        # self.eval_ensemble_model()
 
         # Check and save
         self.check_and_save()  # self.broadcast_model_para -> client -> callback_funcs_for_metrics中包含check_and_save()
@@ -372,7 +445,9 @@ class NASServer(Server):
                 weight = local_sample_size / training_set_size
 
                 local_model = copy.deepcopy(self.models[model_idx])
-                local_model.load_state_dict(local_model_para, strict=True)  # recover client model
+                # model_state_dict = local_model.state_dict()
+                # model_state_dict.update(local_model_para)
+                local_model.load_state_dict(local_model_para, strict=True)  # recover client model  # TODO(Variant): this is for my own project
                 local_model.to(self.device)
 
                 self.cached_client_models[model_idx].append(
@@ -504,6 +579,59 @@ class NASClient(Client):
         #             state=self.state,
         #             timestamp=timestamp,
         #             content=metrics))
+
+
+def recalibrate_bn(model, bn_recalibrate_bn_loader, num_batch_per_epoch, num_epoch=5, device=torch.device("cuda:0")):
+    # re-calibrate-bn
+    with torch.no_grad():
+        model.eval()
+        model.reset_running_stats_for_calibration()
+
+        for _ in range(num_epoch):  # re_cali_bn 5 epoch
+
+            bn_recalibrate_bn_loader.reset()
+
+            for batch_i in range(num_batch_per_epoch):
+                inputs, _ = next(bn_recalibrate_bn_loader)
+                inputs = inputs.to(device)
+                model(inputs)
+    return
+
+
+def eval_one_epoch(model, data_loader, num_batch_per_epoch, split='val', metrics={}, device=torch.device("cuda:0"),
+                   forward_func=None, **kwargs):
+    # start eval single model single epoch
+    data_loader.reset()
+
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        try:
+            model.eval()  # freeze again all running statistics if bn_recalibration=True.
+        except:
+            pass
+
+        for batch_i in range(num_batch_per_epoch):
+            inputs, labels = next(data_loader)
+            inputs, labels = inputs.to(device), labels.to(device)
+            if forward_func is not None:
+                y_logits = forward_func(inputs, model,
+                                        kwargs.get("use_amp", False),
+                                        kwargs.get("distillation_logits_type", "avg_logits"),
+                                        kwargs.get("mode", MODE.TEST))
+            else:
+                with autocast(enabled=kwargs.get("use_amp", False)):
+                    y_logits = model(inputs)
+
+            y_true.append(labels.cpu().numpy())
+            y_pred.append(np.argmax(y_logits.cpu().numpy(), axis=-1))
+
+        y_true = np.concatenate(y_true)
+        y_pred = np.concatenate(y_pred)
+
+        metrics.update({f'{split}_acc': np.sum(y_true == y_pred) / len(y_true),
+                        f'{split}_total': len(y_true)})
+
+    return metrics
 
 
 def call_nas_fl_worker(method):

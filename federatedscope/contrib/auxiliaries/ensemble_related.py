@@ -1,8 +1,10 @@
 import torch
 from torch.cuda.amp import autocast
 
+from federatedscope.core.trainers.enums import MODE
 
-def calculate_ensemble_logits(inputs, ensemble_models, use_amp, distillation_logits_type):
+
+def calculate_ensemble_logits(inputs, ensemble_models, use_amp, distillation_logits_type, mode=MODE.TEST):
     """
 
     Args:
@@ -17,7 +19,7 @@ def calculate_ensemble_logits(inputs, ensemble_models, use_amp, distillation_log
     with torch.no_grad():
         y_logits, weights = [], []  # NOTE(Variant): actually, here 'y_true' means 'y_logits'
         for local_weight, client_model in ensemble_models:
-            client_model.eval()
+            client_model.eval() if mode == MODE.TEST else client_model.train()
             with autocast(enabled=use_amp):
                 local_y_logits = client_model(inputs)
             y_logits.append(local_y_logits)
