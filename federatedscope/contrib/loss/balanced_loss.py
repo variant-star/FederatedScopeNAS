@@ -118,15 +118,15 @@ class BalancedLoss(torch.nn.modules.loss._Loss):
         return cb_loss
 
 
-def call_bl_criterion(type, device):
+def call_bl_criterion(type, device, **kwargs):
     if type == 'balanced_fl':
-        return BalancedLoss("focal_loss").to(device)
+        return BalancedLoss("focal_loss", **kwargs).to(device)
     if type == 'balanced_ce':
-        return BalancedLoss("cross_entropy").to(device)
+        return BalancedLoss("cross_entropy", **kwargs).to(device)
     if type == 'balanced_bce':
-        return BalancedLoss("binary_cross_entropy").to(device)
+        return BalancedLoss("binary_cross_entropy", **kwargs).to(device)
     if type == 'balanced_softmax_bce':
-        return BalancedLoss("softmax_binary_cross_entropy").to(device)
+        return BalancedLoss("softmax_binary_cross_entropy", **kwargs).to(device)
 
 
 register_criterion('balanced_loss', call_bl_criterion)

@@ -1,6 +1,7 @@
 import logging
 import copy
 import torch
+import torch.nn as nn
 import os
 import sys
 import numpy as np
@@ -23,6 +24,10 @@ from federatedscope.core.message import Message
 from federatedscope.core.auxiliaries.utils import merge_dict_of_results
 
 from federatedscope.contrib.auxiliaries.ensemble_related import calculate_ensemble_logits
+
+from federatedscope.core.data.wrap_dataset import WrapDataset
+from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
+from federatedscope.core.auxiliaries.ReIterator import ReIterator
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -197,6 +202,16 @@ class NASServer(Server):
                     torch.save({'cur_round': self.state, 'model': self.supernet.state_dict()},
                                os.path.join(self._cfg.outdir, f"supernet.pth"))
 
+                # TODO(Variant): only for debug. 2013.6.29
+                checkpoint_path = "exp/nas_fl_attentive_min_subnet_on_cifar10_lr0.1_lstep1/sub_exp_20230627163450/supernet.pth"
+                saved_state_dict = torch.load(checkpoint_path)
+                if "model" in saved_state_dict:
+                    saved_state_dict = saved_state_dict["model"]
+                if "state_dict" in saved_state_dict:
+                    saved_state_dict = saved_state_dict["state_dict"]
+                self.supernet.load_state_dict(saved_state_dict)
+                print("load the checkpoint from previous training!!!")
+
                 # decouple the min subnet from supernet
                 if self._cfg.overwrite_supernet_with_aggregation:
                     self.supernet.sample_min_subnet()
@@ -248,7 +263,9 @@ class NASServer(Server):
 
     def distributed_client_eval(self):
         # send 'evaluation' cmd to clients
-        self.broadcast_model_para(msg_type='evaluate_ignore_received_param',
+        # self.broadcast_model_para(msg_type='evaluate_ignore_received_param',
+        #                           filter_unseen_clients=False)
+        self.broadcast_model_para(msg_type='evaluate',
                                   filter_unseen_clients=False)
 
     def eval_server_model(self, DISPLAY="Server Model", mode=MODE.TEST):
@@ -331,19 +348,23 @@ class NASServer(Server):
             header_to_sample[header]()
 
             subnet = self.supernet_trainer.ctx.model.get_active_subnet(preserve_weight=True)
-            subnet.cuda()  # TODO(Variant): simply writing
+            subnet.to(self.supernet_trainer.ctx.device)
 
             # re-calibrate-bn
+            ctx_split_loader_init(self.supernet_trainer.ctx, "train")
             recalibrate_bn(subnet,
-                           bn_recalibrate_bn_loader=self.trainer.ctx.get("train_loader"),
-                           num_batch_per_epoch=getattr(self.trainer.ctx, f"num_train_batch"))
+                           bn_recalibration_loader=self.supernet_trainer.ctx.get("train_loader"),
+                           num_batch_per_epoch=getattr(self.supernet_trainer.ctx, f"num_train_batch"),
+                           device=self.supernet_trainer.ctx.device)
 
             # start eval subnet
             for split in self.supernet_trainer_specified_cfg.eval.split:
+                ctx_split_loader_init(self.supernet_trainer.ctx, split)
                 eval_one_epoch(subnet,
-                               data_loader=self.trainer.ctx.get(f"{split}_loader"),
-                               num_batch_per_epoch=getattr(self.trainer.ctx, f"num_{split}_batch"),
+                               data_loader=self.supernet_trainer.ctx.get(f"{split}_loader"),
+                               num_batch_per_epoch=getattr(self.supernet_trainer.ctx, f"num_{split}_batch"),
                                split=split, metrics=metrics,
+                               device=self.supernet_trainer.ctx.device,
                                **{"use_amp": self._cfg.use_amp})
 
             formatted_eval_res = self._supernet_monitor.format_eval_res(
@@ -364,11 +385,13 @@ class NASServer(Server):
         formatted_results = {'Role': f'{DISPLAY} #', 'Round': self.state, 'Results_raw': {}}
         for split in self.server_trainer_specified_cfg.eval.split:
             # evaluate ensemble model
+            ctx_split_loader_init(self.trainer.ctx, split)
             eval_one_epoch(self.cached_client_models[0],
                            data_loader=self.trainer.ctx.get(f"{split}_loader"),
                            num_batch_per_epoch=getattr(self.trainer.ctx, f"num_{split}_batch"),
                            split=split,
                            metrics=formatted_results['Results_raw'],
+                           device=self.trainer.ctx.device,
                            forward_func=calculate_ensemble_logits,
                            **{"use_amp": self._cfg.use_amp,
                               "distillation_logits_type": self._cfg.ensemble_distillation.type})
@@ -387,7 +410,7 @@ class NASServer(Server):
         # self.eval_server_model()
 
         # self.eval_supernet(mode=MODE.TRAIN)
-        self.eval_supernet_with_recalibrate_bn()  # TODO(Variant): important!
+        # self.eval_supernet_with_recalibrate_bn()
 
         # self.eval_ensemble_model()
 
@@ -520,6 +543,85 @@ class NASClient(Client):
     def get_cur_state(self):
         return self.state
 
+    def callback_funcs_for_evaluate(self, message: Message):
+        """
+        NOTE(Variant): 理论上，自supernet采样的模型不具备合理的BN参数，因此在broadcast时需recalibrate-bn on server data.
+        评估某个subnet在某个client上的性能有如下若干选择：
+        1. received BN(recalibrate on server data) or recalibrate bn on server data, directly evaluate received model
+        2. recalibrate bn on private client data, then evaluate the model
+        3. fine-tune on private client data, then evaluate the model
+        """
+        sender, timestamp = message.sender, message.timestamp
+        self.state = message.state
+
+        self.trainer.update(message.content,
+                            strict=self._cfg.federate.share_local_model)
+
+        # 1. received BN(recalibrate on server data) or recalibrate bn on server data, directly evaluate received model
+        ctx_split_loader_init(self.trainer.ctx, "val")
+        recalibrate_bn(self.trainer.ctx.model,
+                       bn_recalibration_loader=self.trainer.ctx.get("val_loader"),  # server data
+                       num_batch_per_epoch=getattr(self.trainer.ctx, f"num_val_batch"),
+                       device=self.trainer.ctx.device)
+
+        metrics = {}
+        for split in self._cfg.eval.split:
+            eval_metrics = self.trainer.evaluate(
+                target_data_split_name=split)
+            metrics.update(**eval_metrics)
+        formatted_eval_res = self._monitor.format_eval_res(
+            metrics,
+            rnd=self.state,
+            role='Client(re_cali_bn_on_server) #{}'.format(self.ID),
+            forms=['raw'],
+            return_raw=True)
+        logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
+
+        # 2. recalibrate bn on private client data, then evaluate the model
+        ctx_split_loader_init(self.trainer.ctx, "train")
+        recalibrate_bn(self.trainer.ctx.model,
+                       bn_recalibration_loader=self.trainer.ctx.get("train_loader"),
+                       num_batch_per_epoch=getattr(self.trainer.ctx, f"num_train_batch"),
+                       device=self.trainer.ctx.device)
+
+        metrics = {}
+        for split in self._cfg.eval.split:
+            eval_metrics = self.trainer.evaluate(
+                target_data_split_name=split)
+            metrics.update(**eval_metrics)
+        formatted_eval_res = self._monitor.format_eval_res(
+            metrics,
+            rnd=self.state,
+            role='Client(re_cali_bn_on_client) #{}'.format(self.ID),
+            forms=['raw'],
+            return_raw=True)
+        logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
+
+        # 3. fine-tune on private client data, then evaluate the model
+        for m in self.trainer.ctx.model.modules():  # reset everything!
+            if isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d) or isinstance(m, nn.SyncBatchNorm):
+                m.reset_running_stats()
+
+        metrics = {}
+        if self._cfg.finetune.before_eval:
+            self.trainer.finetune()
+        for split in self._cfg.eval.split:
+            eval_metrics = self.trainer.evaluate(
+                target_data_split_name=split)
+            metrics.update(**eval_metrics)
+        formatted_eval_res = self._monitor.format_eval_res(
+            metrics,
+            rnd=self.state,
+            role='Client(finetune:{}) #{}'.format(self._cfg.finetune.before_eval, self.ID),
+            forms=['raw'],
+            return_raw=True)
+        logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
+        self._monitor.update_best_result(self.best_results,
+                                         formatted_eval_res['Results_raw'],
+                                         results_type=f"client #{self.ID}")
+        self.history_results = merge_dict_of_results(
+            self.history_results, formatted_eval_res['Results_raw'])
+
     def callback_funcs_for_evaluate_ignore_received_param(self, message: Message):
         """
         NOTE(Variant): only be invoked for local model evaluate, ignore the received param
@@ -534,65 +636,60 @@ class NASClient(Client):
         # if message.content is not None:  # NOTE(Variant): comment it for ignoring the received model parameters
         #     self.trainer.update(message.content,
         #                         strict=self._cfg.federate.share_local_model)
-        if self.early_stopper.early_stopped and self._cfg.federate.method in [
-                "local", "global"
-        ]:
-            metrics = list(self.best_results.values())[0]
-        else:
-            metrics = {}
-            if self._cfg.finetune.before_eval:
-                self.trainer.finetune()
-            for split in self._cfg.eval.split:
-                # TODO: The time cost of evaluation is not considered here
-                eval_metrics = self.trainer.evaluate(
-                    target_data_split_name=split)
 
-                if self._cfg.federate.mode == 'distributed':
-                    logger.info(
-                        self._monitor.format_eval_res(eval_metrics,
-                                                      rnd=self.state,
-                                                      role='Client #{}'.format(
-                                                          self.ID),
-                                                      return_raw=True))
+        metrics = {}
+        if self._cfg.finetune.before_eval:
+            self.trainer.finetune()
+        for split in self._cfg.eval.split:
+            eval_metrics = self.trainer.evaluate(
+                target_data_split_name=split)
+            metrics.update(**eval_metrics)
 
-                metrics.update(**eval_metrics)
-
-            formatted_eval_res = self._monitor.format_eval_res(
-                metrics,
-                rnd=self.state,
-                role='Client #{}'.format(self.ID),
-                forms=['raw'],
-                return_raw=True)
-            logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
-            self._monitor.update_best_result(self.best_results,
-                                             formatted_eval_res['Results_raw'],
-                                             results_type=f"client #{self.ID}")
-            self.history_results = merge_dict_of_results(
-                self.history_results, formatted_eval_res['Results_raw'])
-            self.early_stopper.track_and_check(self.history_results[
-                self._cfg.eval.best_res_update_round_wise_key])
-
-        # self.comm_manager.send(
-        #     Message(msg_type='metrics',
-        #             sender=self.ID,
-        #             receiver=[sender],
-        #             state=self.state,
-        #             timestamp=timestamp,
-        #             content=metrics))
+        formatted_eval_res = self._monitor.format_eval_res(
+            metrics,
+            rnd=self.state,
+            role='Client #{}'.format(self.ID),
+            forms=['raw'],
+            return_raw=True)
+        logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
+        self._monitor.update_best_result(self.best_results,
+                                         formatted_eval_res['Results_raw'],
+                                         results_type=f"client #{self.ID}")
+        self.history_results = merge_dict_of_results(
+            self.history_results, formatted_eval_res['Results_raw'])
 
 
-def recalibrate_bn(model, bn_recalibrate_bn_loader, num_batch_per_epoch, num_epoch=5, device=torch.device("cuda:0")):
+def ctx_split_loader_init(ctx, cur_split):
+    """
+    NOTE: modified based on federatedscope.core.trainers.torch_trainer.GeneralTorchTrainer._hook_on_epoch_start
+    """
+    # prepare dataloader
+    if ctx.get("{}_loader".format(cur_split)) is None:
+        loader = get_dataloader(
+            WrapDataset(ctx.get("{}_data".format(cur_split))),
+            ctx.cfg, cur_split)
+        setattr(ctx, "{}_loader".format(cur_split), ReIterator(loader))
+    elif not isinstance(ctx.get("{}_loader".format(cur_split)),
+                        ReIterator):
+        setattr(ctx, "{}_loader".format(cur_split),
+                ReIterator(ctx.get("{}_loader".format(cur_split))))
+    else:
+        ctx.get("{}_loader".format(cur_split)).reset()
+
+
+def recalibrate_bn(model, bn_recalibration_loader, num_batch_per_epoch, num_epoch=5, device=torch.device("cuda:0")):
     # re-calibrate-bn
+    model.to(device)
     with torch.no_grad():
         model.eval()
         model.reset_running_stats_for_calibration()
 
         for _ in range(num_epoch):  # re_cali_bn 5 epoch
 
-            bn_recalibrate_bn_loader.reset()
+            bn_recalibration_loader.reset()
 
             for batch_i in range(num_batch_per_epoch):
-                inputs, _ = next(bn_recalibrate_bn_loader)
+                inputs, _ = next(bn_recalibration_loader)
                 inputs = inputs.to(device)
                 model(inputs)
     return

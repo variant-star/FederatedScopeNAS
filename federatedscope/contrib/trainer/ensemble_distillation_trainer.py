@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 import copy
 import numpy as np
@@ -15,17 +17,6 @@ from federatedscope.core.trainers.context import CtxVar, lifecycle
 from AttentiveNAS.models.attentive_nas_dynamic_model import AttentiveNasDynamicModel
 
 from federatedscope.contrib.auxiliaries.ensemble_related import calculate_ensemble_logits
-
-
-class DummyContext():
-    def __init__(self):
-        pass
-
-    def __enter__(self):
-        pass
-
-    def __exit__(self):
-        pass
 
 
 # Build your trainer here.
@@ -51,8 +42,12 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
 
         super(EnsembleDistillationTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
-        # self._reset_hook_in_trigger()
-        self.step_based_epoch_or_batch = 'epoch'
+        # # setup finetune data, following "federatedscope.core.trainers.trainer.Trainer._setup_data_related_var_in_ctx"
+        # setattr(self.ctx, "finetune_data", getattr(self.ctx, "train_data"))
+        # setattr(self.ctx, "finetune_loader", getattr(self.ctx, "train_loader"))
+        # setattr(self.ctx, "num_finetune_data", getattr(self.ctx, "num_train_data"))
+
+        # self.step_based_epoch_or_batch = 'epoch'
 
         if not client_version:
             self.ensemble_models = config.ensemble_models  # client models
@@ -61,15 +56,10 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
         self.get_cur_state = config.get_cur_state
         # del config.get_cur_state
 
-        criterion_args = self._cfg.criterion.clone()
-        criterion_args.clear_aux_info()
-        self.criterion_kwargs = {k: v for k, v in criterion_args.items() if k != "type"}
-        # 因specified_cfg由init_cfg经merge得到，因此原有的init_cfg.criterion并不会被覆盖删除，因此在forward时需小心
-
         if not client_version:
             self.replace_hook_in_train(
                 self._hook_on_batch_forward_for_server_model \
-                    if not isinstance(self.ctx.model, AttentiveNasDynamicModel) else self._hook_on_batch_forward_for_supernet_debug,  # TODO(Variant): only for debug
+                    if not isinstance(self.ctx.model, AttentiveNasDynamicModel) else self._hook_on_batch_forward_for_supernet,  # TODO(Variant): only for debug
                 'on_batch_forward', target_hook_name='_hook_on_batch_forward')
             self.replace_hook_in_eval(
                 self._hook_on_fit_start_init_for_evaluate,  # for supernet, it doesn't support 'eval' mode, so we use "train" mode, but no optimizer and scheduler
@@ -102,14 +92,25 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
         # prepare model and optimizer
         ctx.model.to(ctx.device)
 
+        if isinstance(ctx.model, AttentiveNasDynamicModel):
+            ctx.model.sample_min_subnet()
+            ctx.startpoint_model = CtxVar(ctx.model.get_active_subnet(preserve_weight=True), LIFECYCLE.ROUTINE)
+
         if ctx.cur_mode in [MODE.TRAIN, MODE.FINETUNE]:
 
-            round_after = ctx.cfg.train.round_after if hasattr(ctx.cfg.train, 'round_after') else 0  # only for supernet
+            if ctx.cur_mode == MODE.TRAIN:
+                round_after = ctx.cfg.train.round_after if hasattr(ctx.cfg.train, 'round_after') else 0  # only for supernet
 
-            ctx.cfg['train'].scheduler['multiplier'] = getattr(ctx, 'num_total_train_batch') \
-                if self.step_based_epoch_or_batch == 'batch' else getattr(ctx, 'num_train_epoch')
-            ctx.cfg['train'].scheduler['max_iters'] = ctx.cfg.federate.total_round_num - round_after
-            ctx.cfg['train'].scheduler['last_epoch'] = self.get_cur_state() - round_after
+                ctx.cfg['train'].scheduler['multiplier'] = getattr(ctx, 'num_total_train_batch') \
+                    if ctx.cfg.train.batch_or_epoch == 'batch' else getattr(ctx, 'num_train_epoch')
+                ctx.cfg['train'].scheduler['max_iters'] = ctx.cfg.federate.total_round_num - round_after
+                ctx.cfg['train'].scheduler['last_epoch'] = self.get_cur_state() - round_after
+
+            else:  # ctx.cur_mode == MODE.FINETUNE
+                ctx.cfg['finetune'].scheduler['multiplier'] = getattr(ctx, 'num_total_train_batch') \
+                    if ctx.cfg.finetune.batch_or_epoch == 'batch' else getattr(ctx, 'num_train_epoch')
+                ctx.cfg['finetune'].scheduler['max_iters'] = 1  # finetune 1 epoch, but still have "local_update_steps"
+                ctx.cfg['finetune'].scheduler['last_epoch'] = -1
 
             # Initialize optimizer here to avoid the reuse of optimizers
             # across different routines
@@ -146,7 +147,7 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
         x, label = [_.to(ctx.device) for _ in ctx.data_batch]
         with autocast(enabled=ctx.cfg.use_amp):
             pred = ctx.model(x)
-            loss_batch = ctx.criterion(pred, label, **self.criterion_kwargs)
+            loss_batch = ctx.criterion(pred, label)
         # if len(label.size()) == 0:
         #     label = label.unsqueeze(0)
 
@@ -169,17 +170,23 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
             ==================================  ===========================
         """
         x, _ = [_.to(ctx.device) for _ in ctx.data_batch]
+        labels = None
+        if ctx.cfg.public_data.annotated: # public labels available
+            _, labels = [_.to(ctx.device) for _ in ctx.data_batch]
 
-        y_logits = calculate_ensemble_logits(x, self.ensemble_models, ctx.cfg.use_amp, ctx.cfg.ensemble_distillation.type)
+        ensemble_y_logits = None
+        if ctx.cfg.ensemble_distillation.enable:  # ensemble distillation
+            ensemble_y_logits = calculate_ensemble_logits(x, self.ensemble_models, ctx.cfg.use_amp,
+                                                          ctx.cfg.ensemble_distillation.type)
 
         with autocast(enabled=ctx.cfg.use_amp):
             prob = ctx.model(x)
-            loss_batch = ctx.criterion(prob, y_logits)
+            loss_batch = calculate_mixed_loss(ctx, prob, labels, ensemble_y_logits)
 
-        ctx.y_true = CtxVar(y_logits, LIFECYCLE.BATCH)
+        ctx.y_true = CtxVar(labels, LIFECYCLE.BATCH)
         ctx.y_prob = CtxVar(prob, LIFECYCLE.BATCH)
         ctx.loss_batch = CtxVar(loss_batch, LIFECYCLE.BATCH)
-        ctx.batch_size = CtxVar(len(y_logits), LIFECYCLE.BATCH)
+        ctx.batch_size = CtxVar(len(labels), LIFECYCLE.BATCH)
 
     def _hook_on_batch_forward_for_supernet(self, ctx):
         """
@@ -204,11 +211,6 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
             ensemble_y_logits = calculate_ensemble_logits(x, self.ensemble_models, ctx.cfg.use_amp,
                                                           ctx.cfg.ensemble_distillation.type)
 
-        def calculate_mixed_loss(pred):
-            labels_loss = torch.nn.functional.cross_entropy(pred, labels) if labels is not None else 0
-            ensemble_distillation_loss = ctx.criterion(pred, ensemble_y_logits) if ensemble_y_logits is not None else 0
-            return labels_loss + ensemble_distillation_loss
-
         num_arch_training = ctx.cfg.supernet_arch_sampler.num_arch_training
         prob = {arch_id: None for arch_id in range(num_arch_training)}
 
@@ -219,11 +221,12 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
             ctx.model.sample_min_subnet() if ctx.cfg.inplace_distillation.type == "reverse" else ctx.model.sample_max_subnet()
             ctx.model.set_dropout_rate(0, 0, True)  # NOTE(Variant): derive logits, so disable dropout etc.
 
-            with torch.no_grad() if labels is None and ensemble_y_logits is None else DummyContext():
+            ctx_mgr = torch.no_grad() if labels is None and ensemble_y_logits is None else contextlib.nullcontext()
+            with ctx_mgr:  # 若labels或ensemble_y_logits均为none时，此时inplace distillation中teacher subnet无法获得训练目标，因此torch.no_grad
                 with autocast(enabled=ctx.cfg.use_amp):  # TODO(Variant): 原需设定ctx.model.eval()，而supernet不支持eval
                     prob[0] = ctx.model(x)
 
-            loss_batch.append(calculate_mixed_loss(prob[0]))
+            loss_batch.append(calculate_mixed_loss(ctx, prob[0], labels, ensemble_y_logits))
 
             with torch.no_grad():
                 inplace_y_logits = prob[0].clone().detach()
@@ -254,7 +257,7 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
                 if ctx.cfg.inplace_distillation.enable:
                     loss = ctx.criterion(prob[arch_id], inplace_y_logits)
                 else:
-                    loss = calculate_mixed_loss(prob[arch_id])
+                    loss = calculate_mixed_loss(ctx, prob[arch_id], labels, ensemble_y_logits)
                 loss_batch.append(loss)
 
         # restore default setting
@@ -265,61 +268,6 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
         ctx.y_prob = CtxVar(prob[0], LIFECYCLE.BATCH)
         ctx.loss_batch = CtxVar(sum(loss_batch), LIFECYCLE.BATCH)
         ctx.batch_size = CtxVar(len(prob[0]), LIFECYCLE.BATCH)
-
-    def _hook_on_batch_forward_for_supernet_debug(self, ctx):  # TODO(Variant): only for debug
-        x, labels = [_.to(ctx.device) for _ in ctx.data_batch]
-
-        num_arch_training = ctx.cfg.supernet_arch_sampler.num_arch_training
-        prob = {arch_id: None for arch_id in range(num_arch_training)}
-
-        loss_batch = []
-
-        if ctx.cfg.inplace_distillation.enable:  # disable ensemble distillation
-            ctx.model.sample_min_subnet() if ctx.cfg.inplace_distillation.type == "reverse" else ctx.model.sample_max_subnet()
-            ctx.model.set_dropout_rate(0, 0, True)  # NOTE(Variant): derive logits, so disable dropout etc.
-
-            with autocast(enabled=ctx.cfg.use_amp):  # TODO(Variant): 原需设定ctx.model.eval()，而supernet不支持eval
-                y_logits = ctx.model(x)
-                loss = torch.nn.functional.cross_entropy(y_logits, labels, label_smoothing=0.1)  # TODO(Variant): only for debug
-            loss_batch.append(loss)
-            with torch.no_grad():
-                y_logits = y_logits.clone().detach()
-            prob[0] = y_logits
-        else:
-            y_logits = calculate_ensemble_logits(x, self.ensemble_models, ctx.cfg.use_amp,
-                                                 ctx.cfg.ensemble_distillation.type)
-
-        for arch_id in range(1 if ctx.cfg.inplace_distillation.enable else 0, num_arch_training):
-            if arch_id == 0:
-                ctx.model.sample_min_subnet()
-                ctx.model.set_dropout_rate(0, 0, True)
-            elif arch_id == num_arch_training - 1:
-                if (not ctx.cfg.inplace_distillation.enable) or (ctx.cfg.inplace_distillation.type == "reverse"):
-                    ctx.model.sample_max_subnet()
-                    # add regularization for the largest subnet
-                    ctx.model.set_dropout_rate(ctx.cfg.supernet.drop_out, ctx.cfg.supernet.drop_connect,
-                                               drop_connect_only_last_two_stages=ctx.cfg.supernet.drop_connect_only_last_two_stages)
-                else:
-                    ctx.model.sample_min_subnet()
-                    ctx.model.set_dropout_rate(0, 0, True)
-            else:
-                ctx.model.sample_active_subnet()
-                ctx.model.set_dropout_rate(0, 0, True)
-
-            with autocast(enabled=ctx.cfg.use_amp):
-                prob[arch_id] = ctx.model(x)
-                loss = ctx.criterion(prob[arch_id], y_logits)
-                loss_batch.append(loss)
-
-        # restore default setting
-        ctx.model.sample_max_subnet()
-        ctx.model.set_dropout_rate(0, 0, True)
-
-        loss_batch = sum(loss_batch)
-        ctx.y_true = CtxVar(y_logits, LIFECYCLE.BATCH)
-        ctx.y_prob = CtxVar(prob[0], LIFECYCLE.BATCH)
-        ctx.loss_batch = CtxVar(loss_batch, LIFECYCLE.BATCH)
-        ctx.batch_size = CtxVar(len(y_logits), LIFECYCLE.BATCH)
 
     def _hook_on_batch_backward(self, ctx):
         """
@@ -350,12 +298,17 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
                                                ctx.grad_clip)
             ctx.optimizer.step()
 
-        if self.step_based_epoch_or_batch == 'batch':
-            if ctx.scheduler is not None:
-                ctx.scheduler.step()
-        else:  # self.step_based_epoch_or_batch == 'epoch'
-            if ctx.cur_batch_i == getattr(ctx, f"num_{self.ctx.cur_split}_batch") - 1:
-                ctx.scheduler.step()
+        if isinstance(ctx.model, AttentiveNasDynamicModel) and \
+                ctx.cfg.freeze_teacher_subnet.enable and \
+                self.get_cur_state() >= ctx.cfg.freeze_teacher_subnet.round_after:
+            ctx.model.load_weights_from_pretrained_submodel(ctx.startpoint_model)
+
+        # if self.step_based_epoch_or_batch == 'batch':
+        #     if ctx.scheduler is not None:
+        #         ctx.scheduler.step()
+        # else:  # self.step_based_epoch_or_batch == 'epoch'
+        if ctx.cur_batch_i == getattr(ctx, f"num_{self.ctx.cur_split}_batch") - 1:
+            ctx.scheduler.step()
 
     def _hook_on_fit_end(self, ctx):
         """
@@ -447,6 +400,14 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
             self.ctx.eval_metrics = dict()
 
         return self.ctx.eval_metrics
+
+
+def calculate_mixed_loss(ctx, pred, labels, ensemble_y_logits):
+    labels_loss = torch.nn.functional.cross_entropy(  # TODO(Variant): cross_entropy 无需 balanced loss
+        pred, labels, label_smoothing=0 if ctx.cfg.data.type == "cifar10" else 0.1
+    ) if labels is not None else 0
+    ensemble_distillation_loss = ctx.criterion(pred, ensemble_y_logits) if ensemble_y_logits is not None else 0
+    return labels_loss + ensemble_distillation_loss
 
 
 def call_nas_trainer(trainer_type):
