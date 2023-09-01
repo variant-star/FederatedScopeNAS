@@ -44,10 +44,10 @@ class NT_xentloss(nn.Module):
         return loss
 
 
-def create_NT_xentloss(type, device):
+def create_NT_xentloss(type, device, **kwargs):
 
     if type == 'NT_xentloss':
-        criterion = NT_xentloss().to(device)
+        criterion = NT_xentloss(**kwargs).to(device)
 
         return criterion
 

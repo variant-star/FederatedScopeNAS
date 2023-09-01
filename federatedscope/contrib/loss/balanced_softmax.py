@@ -49,7 +49,7 @@ class BalancedSoftmax(torch.nn.modules.loss._Loss):
         spc = spc.unsqueeze(0).expand(batch_size, -1)
         logits = logits + spc.log()
 
-        label_smoothing = label_smoothing or label_smoothing
+        label_smoothing = label_smoothing or self.label_smoothing
         return F.cross_entropy(input=logits, target=labels, label_smoothing=label_smoothing)
 
 

@@ -36,7 +36,7 @@ ALL_LETTERS = "\n !\"&'(),-.0123456789:;>?ABCDEFGHIJKLMNOPQRSTUVWXYZ[" \
               "]abcdefghijklmnopqrstuvwxyz}"
 
 
-def create_character_loss(type, device):
+def create_character_loss(type, device, **kwargs):
     """
     Character_loss from FedEM:
     https://github.com/omarfoq/FedEM/blob/ \
@@ -49,7 +49,7 @@ def create_character_loss(type, device):
             labels_weight[all_characters.index(
                 character)] = CHARACTERS_WEIGHTS[character]
         labels_weight = labels_weight * 8
-        criterion = torch.nn.CrossEntropyLoss(weight=labels_weight).to(device)
+        criterion = torch.nn.CrossEntropyLoss(weight=labels_weight, **kwargs).to(device)
 
         return criterion
 

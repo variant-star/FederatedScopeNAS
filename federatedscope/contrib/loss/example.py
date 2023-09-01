@@ -1,7 +1,7 @@
 from federatedscope.register import register_criterion
 
 
-def call_my_criterion(type, device):
+def call_my_criterion(type, device, **kwargs):
     try:
         import torch.nn as nn
     except ImportError:
@@ -10,7 +10,7 @@ def call_my_criterion(type, device):
 
     if type == 'mycriterion':
         if nn is not None:
-            criterion = nn.CrossEntropyLoss().to(device)
+            criterion = nn.CrossEntropyLoss(**kwargs).to(device)
         return criterion
 
 
