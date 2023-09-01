@@ -18,7 +18,7 @@ except ImportError as error:
         f'available.')
 
 
-def get_criterion(criterion_type, device):
+def get_criterion(criterion_type, device, **kwargs):
     """
     This function builds an instance of loss functions from: \
     "https://pytorch.org/docs/stable/nn.html#loss-functions",
@@ -32,13 +32,13 @@ def get_criterion(criterion_type, device):
         An instance of loss functions.
     """
     for func in register.criterion_dict.values():
-        criterion = func(criterion_type, device)
+        criterion = func(criterion_type, device, **kwargs)
         if criterion is not None:
             return criterion
 
     if isinstance(criterion_type, str):
         if hasattr(nn, criterion_type):
-            return getattr(nn, criterion_type)()
+            return getattr(nn, criterion_type)(**kwargs)
         else:
             raise NotImplementedError(
                 'Criterion {} not implement'.format(criterion_type))
