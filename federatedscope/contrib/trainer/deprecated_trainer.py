@@ -4,6 +4,7 @@ import torch
 import copy
 import numpy as np
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, Dataset
 
 from federatedscope.register import register_trainer
 from federatedscope.core.trainers.torch_trainer import GeneralTorchTrainer
@@ -35,17 +36,7 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
 
         client_version = config['client_version']
 
-        #  # NOTE(Variant): 若要以以下方式更换，则需放置在__init__之前
-        # if not client_version:
-        #     self._hook_on_batch_forward = self._hook_on_batch_forward_for_server_model \
-        #         if not isinstance(model, AttentiveNasDynamicModel) else self._hook_on_batch_forward_for_supernet
-
         super(EnsembleDistillationTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
-
-        # # setup finetune data, following "federatedscope.core.trainers.trainer.Trainer._setup_data_related_var_in_ctx"
-        # setattr(self.ctx, "finetune_data", getattr(self.ctx, "train_data"))
-        # setattr(self.ctx, "finetune_loader", getattr(self.ctx, "train_loader"))
-        # setattr(self.ctx, "num_finetune_data", getattr(self.ctx, "num_train_data"))
 
         # self.step_based_epoch_or_batch = 'epoch'
 
@@ -71,6 +62,40 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
 
         # prepare mixed precision computation
         self.ctx.scaler = GradScaler() if self.ctx.cfg.use_amp else None
+
+    def parse_data(self, data):
+        # modified "federatedscope.core.trainers.torch_trainer.GeneralTorchTrainer"
+        #  to make it receive other splited data like "server(for recalibrate bn)".
+        """Populate "${split}_data", "${split}_loader" and "num_${
+        split}_data" for different data splits
+        """
+        init_dict = dict()
+        if isinstance(data, dict):
+            for split in data.keys():
+                # if split not in ['train', 'val', 'test']:
+                #     continue
+                init_dict["{}_data".format(split)] = None
+                init_dict["{}_loader".format(split)] = None
+                init_dict["num_{}_data".format(split)] = 0
+                if data.get(split, None) is not None:
+                    if isinstance(data.get(split), Dataset):
+                        init_dict["{}_data".format(split)] = data.get(split)
+                        init_dict["num_{}_data".format(split)] = len(
+                            data.get(split))
+                    elif isinstance(data.get(split), DataLoader):
+                        init_dict["{}_loader".format(split)] = data.get(split)
+                        init_dict["num_{}_data".format(split)] = len(
+                            data.get(split).dataset)
+                    elif isinstance(data.get(split), dict):
+                        init_dict["{}_data".format(split)] = data.get(split)
+                        init_dict["num_{}_data".format(split)] = len(
+                            data.get(split)['y'])
+                    else:
+                        raise TypeError("Type {} is not supported.".format(
+                            type(data.get(split))))
+        else:
+            raise TypeError("Type of data should be dict.")
+        return init_dict
 
     def _hook_on_fit_start_init(self, ctx):
         """
@@ -107,8 +132,8 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
                 ctx.cfg['train'].scheduler['last_epoch'] = self.get_cur_state() - round_after
 
             else:  # ctx.cur_mode == MODE.FINETUNE
-                ctx.cfg['finetune'].scheduler['multiplier'] = getattr(ctx, 'num_total_train_batch') \
-                    if ctx.cfg.finetune.batch_or_epoch == 'batch' else getattr(ctx, 'num_train_epoch')
+                ctx.cfg['finetune'].scheduler['multiplier'] = getattr(ctx, 'num_total_finetune_batch') \
+                    if ctx.cfg.finetune.batch_or_epoch == 'batch' else getattr(ctx, 'num_finetune_epoch')
                 ctx.cfg['finetune'].scheduler['max_iters'] = 1  # finetune 1 epoch, but still have "local_update_steps"
                 ctx.cfg['finetune'].scheduler['last_epoch'] = -1
 
@@ -235,6 +260,8 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
         #  获取该 teacher subnet 的 inplace_logits 用于监督其他 subnet 的训练。
         # TODO(Variant): 若不使能 inplace_distillation，则 true labels 与 ensemble logits 用于监督所有 subnet 的训练。
 
+        # TODO(Variant): 2023.9.7 上述信息需改动，inplace_distillation存在时，label也需监督所有subnet的训练。
+
         for arch_id in range(1 if ctx.cfg.inplace_distillation.enable else 0, num_arch_training):
             if arch_id == 0:
                 ctx.model.sample_min_subnet()
@@ -254,10 +281,14 @@ class EnsembleDistillationTrainer(GeneralTorchTrainer):
 
             with autocast(enabled=ctx.cfg.use_amp):
                 prob[arch_id] = ctx.model(x)
+                # if ctx.cfg.inplace_distillation.enable:
+                #     loss = ctx.criterion(prob[arch_id], inplace_y_logits)
+                # else:
+                #     loss = calculate_mixed_loss(ctx, prob[arch_id], labels, ensemble_y_logits)
+                # TODO(Variant): 2023.9.7 使能这里 #question
                 if ctx.cfg.inplace_distillation.enable:
-                    loss = ctx.criterion(prob[arch_id], inplace_y_logits)
-                else:
-                    loss = calculate_mixed_loss(ctx, prob[arch_id], labels, ensemble_y_logits)
+                    loss = ctx.criterion(prob[arch_id], inplace_y_logits / ctx.cfg.inplace_distillation.temperature) + \
+                           calculate_mixed_loss(ctx, prob[arch_id], labels, ensemble_y_logits)
                 loss_batch.append(loss)
 
         # restore default setting
@@ -406,14 +437,15 @@ def calculate_mixed_loss(ctx, pred, labels, ensemble_y_logits):
     labels_loss = torch.nn.functional.cross_entropy(  # TODO(Variant): cross_entropy 无需 balanced loss
         pred, labels, label_smoothing=0 if ctx.cfg.data.type == "cifar10" else 0.1
     ) if labels is not None else 0
-    ensemble_distillation_loss = ctx.criterion(pred, ensemble_y_logits) if ensemble_y_logits is not None else 0
+    ensemble_distillation_loss = ctx.criterion(pred, ensemble_y_logits / ctx.cfg.ensemble_distillation.temperature) \
+        if ensemble_y_logits is not None else 0
     return labels_loss + ensemble_distillation_loss
 
 
-def call_nas_trainer(trainer_type):
-    if trainer_type == 'ensemble_distillation_trainer':
-        trainer_builder = EnsembleDistillationTrainer
-        return trainer_builder
-
-
-register_trainer('ensemble_distillation_trainer', call_nas_trainer)
+# def call_nas_trainer(trainer_type):
+#     if trainer_type == 'ensemble_distillation_trainer':
+#         trainer_builder = EnsembleDistillationTrainer
+#         return trainer_builder
+#
+#
+# register_trainer('ensemble_distillation_trainer', call_nas_trainer)

@@ -1,0 +1,188 @@
+wandb:
+  use: false
+  name_user: justone
+  name_project: distributed_attentive_nas
+  client_train_info: true # train results on Client
+  server_train_info: true # train results on Server
+  online_track: true # origin: false, why
+use_gpu: true
+use_amp: true
+
+ensemble_distillation:
+  enable: false
+  type: "avg_logits"  # "avg_logits" or "max_logits"
+  temperature: 1.0
+  include: [ "min", "max", "non-extreme" ]
+  coef: 1.0
+
+inplace_distillation:
+  enable: true
+  type: "reverse" # "normal" or "reverse"
+  temperature: 1.0
+  coef: 1.0
+
+public_ground_truth:
+  enable: true
+  include: [ "min" , "max", "non-extreme"] # , "max", "non-extreme"
+
+#supernet_bn_tracking: true
+
+device: 0
+#early_stop:
+#  patience: 5
+seed: 0
+federate:
+  method: nas_fl
+  mode: standalone
+  process_num: 1  # maybe we can use gpus >= 1
+  client_num: 8
+  total_round_num: 360
+  sampler: uniform
+#  sample_client_rate: 1.0
+  make_global_eval: true  # simulate the global eval
+  resource_info_file: ''  # NOTE(Variant): for personalized NAS
+#fedprox:
+#  use: false
+#  mu: 0.1
+personalization:
+  local_param: []
+  share_non_trainable_para: true
+data:
+  root: data/
+  type: cifar100
+  splits: [0.6, 0.2, 0.2]  #[0.0128, 0.984, 0.0032]
+  splitter: lda
+  splitter_args:
+    - alpha: 0.5
+#  subsample: 0.05
+  consistent_label_distribution: true
+  autoaugment: true
+  random_erase: false
+  cutout: false
+#  transform: [['ToTensor'], ['Normalize', {'mean': [0.9637], 'std': [0.1592]}]]
+finetune:
+  before_eval: false
+  batch_or_epoch: epoch
+  local_update_steps: 1 # TODO(Variant): origin 5
+  optimizer:
+    type: patchSGD
+    lr: 0.001
+    momentum: 0.9
+    nesterov: true
+    weight_decay: 0.00001
+    weight_decay_bn_bias: 0.
+  scheduler:
+    type: warmup_cosine_scheduler
+    warmup_iters: 0
+    clamp_lr: 0.
+
+# For Client Training:
+client_trainer_specified:
+  model:
+    type: attentive_min_subnet
+#    n_classes: 10
+    bn_momentum: 0.1
+    bn_eps: 0.00001
+    drop_out: 0.2  # not work, refer to model_factory.py
+    drop_connect: 0.2  # not work, refer to model_factory.py
+  trainer:
+    type: enhance_trainer
+  criterion:
+    type: balanced_softmax # CrossEntropyLoss, balanced_softmax
+    label_smoothing: 0
+  #  beta: 0.9
+  #  fl_gamma: 2.0
+  regularizer:
+    mu: 0.0
+    type: ''
+  dataloader:
+    type: base
+    batch_size: 320
+    drop_last: false # only for train dataloader
+    shuffle: true # only for train dataloader
+    pin_memory: false
+    num_workers: 6
+  train:
+    local_update_steps: 1 # TODO(Variant): origin 5
+    batch_or_epoch: epoch
+    optimizer:
+      type: patchSGD
+      lr: 0.1
+      weight_decay: 0.0005  # TODO(Variant): how to set this value
+      weight_decay_bn_bias: 0.
+    scheduler:
+      type: warmup_cosine_scheduler
+      #      max_iters: 360 # iters, based on batch num
+      warmup_iters: 5 # epoch * num_batch_per_epoch
+      clamp_lr: 0.
+      warmup_factor: 0.0001
+  grad:
+    grad_clip: 1.0
+  eval:
+    freq: 1
+    metrics: ['acc']  # 'correct', 'loss_regular'  #, 'avg_loss'
+    monitoring: []
+    split: ['test'] # 'val',
+    best_res_update_round_wise_key: 'test_acc'
+    report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
+
+
+# For Server distillation to supernet (training)
+supernet_trainer_specified:
+  model:
+    type: attentive_supernet
+#    n_classes: 10
+    bn_momentum: 0
+    bn_eps: 0.00001
+    drop_out: 0.2
+    drop_connect: 0.2
+    drop_connect_only_last_two_stages: true
+  trainer:
+    type: distill_trainer
+  criterion:
+    type: alpha_divergence  # alpha_divergence, KLDivLoss,
+  regularizer:
+    mu: 0.0
+    type: ''
+  dataloader:
+    type: base
+    batch_size: 320
+    drop_last: false # only for train dataloader
+    shuffle: true # only for train dataloader
+    pin_memory: false
+    num_workers: 6
+  train:
+    round_after: 0
+    batch_or_epoch: epoch
+    local_update_steps: 1
+    optimizer:
+      type: patchSGD
+      lr: 0.1
+      momentum: 0.9
+      nesterov: true
+      weight_decay: 0.00001
+      weight_decay_bn_bias: 0.
+    scheduler:
+      type: warmup_cosine_scheduler
+#      max_iters: 360 # iters, based on batch num
+      warmup_iters: 5 # epoch * num_batch_per_epoch
+      clamp_lr: 0.
+      warmup_factor: 0.0001
+  grad:
+    grad_clip: 1.0
+  eval:
+    freq: 1
+    metrics: ['acc'] #, 'avg_loss'
+    monitoring: []
+    split: ['test', 'train']  # for 'train' split, it has train_transform
+    best_res_update_round_wise_key: 'test_acc'
+    report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
+
+  supernet_arch_sampler:
+    num_arch_training: 4
+    method: 'bestup'
+    arch_to_flops_map_file_path: './attentive_nas_data/flops_archs_off_table.map'
+    discretize_step: 25
+    num_trials: 3
+
+

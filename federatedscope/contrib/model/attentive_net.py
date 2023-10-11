@@ -32,6 +32,7 @@ def call_attentive_net(model_config, input_shape):
         # model_cfg.bn_momentum = 0
         # model_cfg.bn_eps = 1e-5
 
+        # NOTE: cfg.drop_out, cfg.drop_connect 无效。对于dynamic model，其drop率随着训练采样动态变化。
         if model_config.type == "attentive_supernet":
             model = create_model(cfg, "attentive_nas_dynamic_model")
             return model
