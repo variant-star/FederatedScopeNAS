@@ -347,7 +347,7 @@ class NASServer(Server):
 
             for i in range(len(msg_list)):  # recover and store the received clients' models
                 local_sample_size, local_model_para = msg_list[i]
-                weight = local_sample_size / training_set_size
+                weight = local_sample_size / max(training_set_size, 1)
 
                 local_model = copy.deepcopy(self.server_model)
                 # model_state_dict = local_model.state_dict()
@@ -367,11 +367,12 @@ class NASServer(Server):
                 'staleness': staleness,
             }
             # logger.info(f'The staleness is {staleness}')
-            result = aggregator.aggregate(agg_info)
-            # Due to lazy load, we merge two state dict
-            merged_param = merge_param_dict(self.server_model.state_dict().copy(), result)
-            self.server_model.load_state_dict(merged_param, strict=False)
-            model.load_weights_from_pretrained_submodel(self.server_model.state_dict())
+            if training_set_size > 0:
+                result = aggregator.aggregate(agg_info)
+                # Due to lazy load, we merge two state dict
+                merged_param = merge_param_dict(self.server_model.state_dict().copy(), result)
+                self.server_model.load_state_dict(merged_param, strict=False)
+                model.load_weights_from_pretrained_submodel(self.server_model.state_dict())
 
         return aggregated_num
 
@@ -622,10 +623,9 @@ def ctx_split_loader_init(ctx, cur_split):
 def recalibrate_bn(model, bn_recalibration_loader, num_batch_per_epoch, num_epoch=1, device=torch.device("cuda:0")):
     # re-calibrate-bn
     model.to(device)
+    model.eval()
+    model.reset_running_stats_for_calibration()
     with torch.no_grad():
-        model.eval()
-        model.reset_running_stats_for_calibration()
-
         # NOTE(Variant): 当设置bn.momentum=None时，使用cumulative moving average (simple average)，因此epoch数不影响结果
         for _ in range(num_epoch):  # re_cali_bn N epoch
 

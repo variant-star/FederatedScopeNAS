@@ -11,19 +11,19 @@ use_amp: true
 ensemble_distillation:
   enable: false
   type: "avg_logits"  # "avg_logits" or "max_logits"
-  temperature: 1.0
+  temperature: 5.0
   include: [ "min", "max", "non-extreme" ]
-  coef: 1.0
+  coef: 0.5
 
 inplace_distillation:
   enable: true
-  type: "reverse" # "normal" or "reverse"
+  type: "normal" # "normal" or "reverse"
   temperature: 1.0
   coef: 1.0
 
 public_ground_truth:
   enable: true
-  include: [ "min" , "max", "non-extreme"] # , "max", "non-extreme"
+  include: [ "max"] # , "max", "non-extreme"
 
 #supernet_bn_tracking: true
 
@@ -50,7 +50,7 @@ personalization:
 data:
   root: data/
   type: cifar100
-  splits: [0.6, 0.2, 0.2]  #[0.0128, 0.984, 0.0032]
+  splits: [0.8, 0.1, 0.1]  # [all_clients_train_set, all_clients_val_set, server_train_set]
   splitter: lda
   splitter_args:
     - alpha: 0.5
@@ -63,7 +63,7 @@ data:
 finetune:
   before_eval: false
   batch_or_epoch: epoch
-  local_update_steps: 1 # TODO(Variant): origin 5
+  local_update_steps: 1
   optimizer:
     type: patchSGD
     lr: 0.001
@@ -103,7 +103,7 @@ client_trainer_specified:
     pin_memory: false
     num_workers: 6
   train:
-    local_update_steps: 1 # TODO(Variant): origin 5
+    local_update_steps: 1
     batch_or_epoch: epoch
     optimizer:
       type: patchSGD
@@ -146,7 +146,7 @@ supernet_trainer_specified:
     type: ''
   dataloader:
     type: base
-    batch_size: 320
+    batch_size: 256
     drop_last: false # only for train dataloader
     shuffle: true # only for train dataloader
     pin_memory: false
@@ -154,7 +154,7 @@ supernet_trainer_specified:
   train:
     round_after: 0
     batch_or_epoch: epoch
-    local_update_steps: 1
+    local_update_steps: 10
     optimizer:
       type: patchSGD
       lr: 0.1

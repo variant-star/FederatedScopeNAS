@@ -55,8 +55,8 @@ def load_cifar_data(config, client_cfgs=None):
     train_transforms, val_transforms, test_transforms = build_transforms(
         config.data.type.lower(),
         autoaugment=getattr(config.data, "autoaugment", True),
-        random_erase=getattr(config.data, "random_erase", True),
-        cutout=getattr(config.data, "cutout", True),
+        random_erase=getattr(config.data, "random_erase", False),
+        cutout=getattr(config.data, "cutout", False),
     )
 
     if config.data.type.lower() == "cifar10":
@@ -79,6 +79,9 @@ def load_cifar_data(config, client_cfgs=None):
     all_clients_val_dataset.dataset.transform = test_transforms
 
     fs_data = translator((all_clients_train_dataset, all_clients_val_dataset, raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
+
+    # # debug: 仅当all_clients_train_dataset与all_clients_val_dataset为空时，使得代码正常运行
+    # fs_data = translator((copy.deepcopy(raw_test_dataset), copy.deepcopy(raw_test_dataset), raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
 
     from federatedscope.core.data import ClientData
     from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
