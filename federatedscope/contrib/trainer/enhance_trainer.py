@@ -1,7 +1,6 @@
-import contextlib
-
 import torch
-import copy
+import torch.nn.functional as F
+import logging
 import numpy as np
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
@@ -11,17 +10,18 @@ from federatedscope.core.trainers.torch_trainer import GeneralTorchTrainer
 
 from federatedscope.core.auxiliaries.optimizer_builder import get_optimizer
 from federatedscope.core.auxiliaries.scheduler_builder import get_scheduler
+from federatedscope.core.trainers.utils import format_log_hooks
 
 from federatedscope.core.trainers.enums import MODE, LIFECYCLE
 from federatedscope.core.trainers.context import CtxVar, lifecycle
 
-from AttentiveNAS.models.attentive_nas_dynamic_model import AttentiveNasDynamicModel
+logger = logging.getLogger(__name__)
 
 
 # Build your trainer here.
 class EnhanceTrainer(GeneralTorchTrainer):
     """
-        distillate knowledge from 'ensemble client models' to 'server model' and 'nas supernet'
+        1. add torch.cuda.amp,  2. enhance optimizer and lr_scheduler
     """
     def __init__(self,
                  model,
@@ -34,13 +34,18 @@ class EnhanceTrainer(GeneralTorchTrainer):
 
         super(EnhanceTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
-        # self.step_based_epoch_or_batch = 'epoch'
-
-        self.get_cur_state = config.get_cur_state
-        # del config.get_cur_state
+        if only_for_eval:
+            # only_for_eval => don't register hooks_train. So we change it.
+            # However, this change will not display in self.print_trainer_meta_info()
+            self.register_default_hooks_train()
 
         self.replace_hook_in_eval(
-            self._hook_on_batch_forward_for_evaluate,  # normal forward, no ensemble distillation
+            self._hook_on_fit_start_init_for_evaluate,
+            'on_fit_start', target_hook_name='_hook_on_fit_start_init')
+        # Important! for supernet, it doesn't support 'eval' mode, so we use "train" mode, but no optimizer and scheduler
+
+        self.replace_hook_in_eval(
+            self._hook_on_batch_forward_for_evaluate,  # normal forward, no optimizer and lr_scheduler.
             'on_batch_forward', target_hook_name='_hook_on_batch_forward')
 
         # prepare mixed precision computation
@@ -81,38 +86,16 @@ class EnhanceTrainer(GeneralTorchTrainer):
         return init_dict
 
     def _hook_on_fit_start_init(self, ctx):
-        """
-        Note:
-          The modified attributes and according operations are shown below:
-            ==================================  ===========================
-            Attribute                           Operation
-            ==================================  ===========================
-            ``ctx.model``                       Move to ``ctx.device``
-            ``ctx.optimizer``                   Initialize by ``ctx.cfg``
-            ``ctx.scheduler``                   Initialize by ``ctx.cfg``
-            ``ctx.loss_batch_total``            Initialize to 0
-            ``ctx.loss_regular_total``          Initialize to 0
-            ``ctx.num_samples``                 Initialize to 0
-            ``ctx.ys_true``                     Initialize to ``[]``
-            ``ctx.ys_prob``                     Initialize to ``[]``
-            ==================================  ===========================
-        """
         # prepare model and optimizer
         ctx.model.to(ctx.device)
-
-        if isinstance(ctx.model, AttentiveNasDynamicModel):
-            ctx.model.sample_min_subnet()
-            ctx.startpoint_model = CtxVar(ctx.model.get_active_subnet(preserve_weight=True), LIFECYCLE.ROUTINE)
 
         if ctx.cur_mode in [MODE.TRAIN, MODE.FINETUNE]:
 
             if ctx.cur_mode == MODE.TRAIN:
-                round_after = ctx.cfg.train.round_after if hasattr(ctx.cfg.train, 'round_after') else 0  # only for supernet
-
                 ctx.cfg['train'].scheduler['multiplier'] = getattr(ctx, 'num_total_train_batch') \
                     if ctx.cfg.train.batch_or_epoch == 'batch' else getattr(ctx, 'num_train_epoch')
-                ctx.cfg['train'].scheduler['max_iters'] = ctx.cfg.federate.total_round_num - round_after
-                ctx.cfg['train'].scheduler['last_epoch'] = self.get_cur_state() - round_after
+                ctx.cfg['train'].scheduler['max_iters'] = ctx.cfg.federate.total_round_num
+                ctx.cfg['train'].scheduler['last_epoch'] = self.get_cur_state()
 
             else:  # ctx.cur_mode == MODE.FINETUNE
                 ctx.cfg['finetune'].scheduler['multiplier'] = getattr(ctx, 'num_total_finetune_batch') \
@@ -140,18 +123,6 @@ class EnhanceTrainer(GeneralTorchTrainer):
         ctx.ys_prob = CtxVar([], LIFECYCLE.ROUTINE)
 
     def _hook_on_batch_forward(self, ctx):
-        """
-        Note:
-          The modified attributes and according operations are shown below:
-            ==================================  ===========================
-            Attribute                           Operation
-            ==================================  ===========================
-            ``ctx.y_true``                      Move to `ctx.device`
-            ``ctx.y_prob``                      Forward propagation get y_prob
-            ``ctx.loss_batch``                  Calculate the loss
-            ``ctx.batch_size``                  Get the batch_size
-            ==================================  ===========================
-        """
         x, label = [_.to(ctx.device) for _ in ctx.data_batch]
         with autocast(enabled=ctx.cfg.use_amp):
             pred = ctx.model(x)
@@ -165,17 +136,6 @@ class EnhanceTrainer(GeneralTorchTrainer):
         ctx.batch_size = CtxVar(len(label), LIFECYCLE.BATCH)
 
     def _hook_on_batch_backward(self, ctx):
-        """
-        Note:
-          The modified attributes and according operations are shown below:
-            ==================================  ===========================
-            Attribute                           Operation
-            ==================================  ===========================
-            ``ctx.optimizer``                   Update by gradient
-            ``ctx.loss_task``                   Backward propagation
-            ``ctx.scheduler``                   Update by gradient
-            ==================================  ===========================
-        """
         ctx.optimizer.zero_grad()
 
         if ctx.cfg.use_amp:
@@ -193,29 +153,13 @@ class EnhanceTrainer(GeneralTorchTrainer):
                                                ctx.grad_clip)
             ctx.optimizer.step()
 
-        # if self.step_based_epoch_or_batch == 'batch':
-        #     if ctx.scheduler is not None:
-        #         ctx.scheduler.step()
-        # else:  # self.step_based_epoch_or_batch == 'epoch'
-        if ctx.cur_batch_i == getattr(ctx, f"num_{self.ctx.cur_split}_batch") - 1:
+        if ctx.cfg[ctx.cur_mode].batch_or_epoch == 'batch':
             ctx.scheduler.step()
+        else:  # batch_or_epoch == 'epoch'
+            if ctx.cur_batch_i == getattr(ctx, f"num_{self.ctx.cur_split}_batch") - 1:
+                ctx.scheduler.step()
 
     def _hook_on_fit_end(self, ctx):
-        """
-        Evaluate metrics.
-
-        Note:
-          The modified attributes and according operations are shown below:
-            ==================================  ===========================
-            Attribute                           Operation
-            ==================================  ===========================
-            ``ctx.ys_true``                     Convert to ``numpy.array``
-            ``ctx.ys_prob``                     Convert to ``numpy.array``
-            ``ctx.monitor``                     Evaluate the results
-            ``ctx.eval_metrics``                Get evaluated results from \
-            ``ctx.monitor``
-            ==================================  ===========================
-        """
         ctx.ys_true = CtxVar(np.concatenate(ctx.ys_true), LIFECYCLE.ROUTINE)
         ctx.ys_prob = CtxVar(np.concatenate(ctx.ys_prob), LIFECYCLE.ROUTINE)
         # 模仿分类任务评估top1 acc或correct等
@@ -225,23 +169,36 @@ class EnhanceTrainer(GeneralTorchTrainer):
         results = ctx.monitor.eval(ctx)
         setattr(ctx, 'eval_metrics', results)
 
+    # def _hook_on_fit_end(self, ctx):
+    #     ctx.ys_true = np.concatenate(ctx.ys_true) if len(ctx.ys_true) > 0 else np.array([])  # only for local_update_steps=0
+    #     ctx.ys_prob = np.concatenate(ctx.ys_prob) if len(ctx.ys_prob) > 0 else np.array([])  # only for local_update_steps=0
+    #     ctx.ys_true = CtxVar(ctx.ys_true, LIFECYCLE.ROUTINE)
+    #     ctx.ys_prob = CtxVar(ctx.ys_prob, LIFECYCLE.ROUTINE)
+    #     # 模仿分类任务评估top1 acc或correct等
+    #     if ctx.ys_true.ndim == 2:
+    #         ctx.ys_true = np.argmax(ctx.ys_true, axis=1)  # NOTE(Variant): new added
+    #
+    #     if getattr(self.ctx, f"num_{self.ctx.cur_split}_epoch") > 0:
+    #         results = ctx.monitor.eval(ctx)
+    #     else:
+    #         results = "NO DATA"
+    #     setattr(ctx, 'eval_metrics', results)
+
+    def _hook_on_fit_start_init_for_evaluate(self, ctx):
+        ctx.model.to(ctx.device)
+
+        # prepare statistics
+        ctx.loss_batch_total = CtxVar(0., LIFECYCLE.ROUTINE)
+        ctx.loss_regular_total = CtxVar(0., LIFECYCLE.ROUTINE)
+        ctx.num_samples = CtxVar(0, LIFECYCLE.ROUTINE)
+        ctx.ys_true = CtxVar([], LIFECYCLE.ROUTINE)
+        ctx.ys_prob = CtxVar([], LIFECYCLE.ROUTINE)
+
     def _hook_on_batch_forward_for_evaluate(self, ctx):
-        """
-        Note:
-          The modified attributes and according operations are shown below:
-            ==================================  ===========================
-            Attribute                           Operation
-            ==================================  ===========================
-            ``ctx.y_true``                      Move to `ctx.device`
-            ``ctx.y_prob``                      Forward propagation get y_prob
-            ``ctx.loss_batch``                  Calculate the loss
-            ``ctx.batch_size``                  Get the batch_size
-            ==================================  ===========================
-        """
         x, label = [_.to(ctx.device) for _ in ctx.data_batch]  # NOTE(Variant): we use the true label (only for eval)
         with autocast(enabled=ctx.cfg.use_amp):
             prob = ctx.model(x)
-            loss_batch = torch.nn.functional.cross_entropy(prob, label)
+            loss_batch = F.cross_entropy(prob, label)
         # if len(label.size()) == 0:
         #     label = label.unsqueeze(0)
 
@@ -263,6 +220,17 @@ class EnhanceTrainer(GeneralTorchTrainer):
             self.ctx.eval_metrics = dict()
 
         return self.ctx.eval_metrics
+
+    def print_trainer_meta_info(self):
+        logger.info(f"Model meta-info: {type(self.ctx.model)}.")
+        logger.debug(f"Model meta-info: {self.ctx.model}.")
+        # logger.info(f"Data meta-info: {self.ctx['data']}.")
+
+        logger.info(f"After register default hooks,\n"
+                    f"\tthe hooks_in_train is:\n\t"
+                    f"{format_log_hooks(self.hooks_in_train)};\n"
+                    f"\tthe hooks_in_eval is:\n\
+            t{format_log_hooks(self.hooks_in_eval)}")
 
 
 def call_enhance_trainer(trainer_type):
