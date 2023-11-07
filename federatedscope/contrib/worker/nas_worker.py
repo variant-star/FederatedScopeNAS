@@ -8,7 +8,7 @@ import numpy as np
 from torch.cuda.amp import GradScaler, autocast
 
 from federatedscope.register import register_worker
-from federatedscope.core.workers import Server, Client
+from federatedscope.contrib.worker.enhance_worker import EnhanceServer, EnhanceClient
 
 from federatedscope.core.auxiliaries.model_builder import get_model
 from federatedscope.core.auxiliaries.trainer_builder import get_trainer
@@ -20,8 +20,6 @@ from federatedscope.core.trainers.enums import MODE
 from federatedscope.core.message import Message
 from federatedscope.core.auxiliaries.utils import merge_dict_of_results
 
-from federatedscope.contrib.auxiliaries.ensemble_related import calculate_ensemble_logits
-
 from federatedscope.core.data.wrap_dataset import WrapDataset
 from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
 from federatedscope.core.auxiliaries.ReIterator import ReIterator
@@ -31,7 +29,7 @@ logger.setLevel(logging.INFO)
 
 
 # Build your worker here.
-class NASServer(Server):
+class NASServer(EnhanceServer):
     def __init__(self,
                  ID=-1,
                  state=0,
@@ -45,58 +43,18 @@ class NASServer(Server):
                  unseen_clients_id=None,
                  **kwargs):
 
-        assert data is not None
+        super(NASServer, self).__init__(ID, state, config, data, model, client_num, total_round_num, device, strategy,
+                                        unseen_clients_id, **kwargs)
+
+        self.trainer.get_cur_state = self.get_cur_state
 
         # Initialize cached message buffer
-        model_num = 1
-        self.cached_client_models = {model_idx: list() for model_idx in range(model_num)}
+        self.cached_client_models = {0: list()}
+        self.trainer.ensemble_models = self.cached_client_models[0]  # model_num = 1
 
-        cfg = copy.deepcopy(config)
-        cfg.merge_from_other_cfg(cfg.supernet_trainer_specified, check_cfg=False)  # 修正data training或eval相关的参数
-
-        # save client_config.yaml begin!
-        from pathlib import Path
-        Path(cfg.outdir).mkdir(parents=True, exist_ok=True)
-        with open(os.path.join(cfg.outdir, "server_config.yaml"), 'w') as outfile:
-            from contextlib import redirect_stdout
-            with redirect_stdout(outfile):
-                tmp_cfg = copy.deepcopy(cfg)
-                tmp_cfg.clear_aux_info()
-                print(tmp_cfg.dump())
-        # save client_config.yaml end!
-
-        cfg['get_cur_state'] = self.get_cur_state
-        cfg['ensemble_models'] = self.cached_client_models[0]
-
-        model = get_model(cfg.model, data, backend=cfg.backend)  # ignore former model, and create supernet
-
-        model.sample_min_subnet()
-        self.server_model = model.get_active_subnet(preserve_weight=True)
-
-        super(NASServer, self).__init__(ID, state, cfg, data, model, client_num, total_round_num, device, strategy,
-                                        unseen_clients_id, **kwargs)
-        assert self.model_num == 1
-
-        # reset distill_trainer
-        self.trainer = get_trainer(
-            model=self.models[0],
-            data=self.data,
-            device=self.device,
-            config=self._cfg,
-            only_for_eval=False,  # the make_global_eval is to enable creating trainer in server.  # crucial
-            monitor=self._monitor
-        )
-        self.trainers = [self.trainer]
-
-        self.train_after_round = self._cfg.train.round_after
-
-        # # # if cfg.supernet_bn_tracking:
-        # for m in self.model.modules():  # self.model == supernet
-        #     if isinstance(m, torch.nn.BatchNorm2d) or isinstance(m, torch.nn.BatchNorm1d):
-        #         m.track_running_stats = True
-
-    def get_cur_state(self):
-        return self.state
+        # construct server_model
+        self.models[0].sample_min_subnet()
+        self.server_model = self.models[0].get_active_subnet(preserve_weight=True)
 
     def check_and_move_on(self,
                           check_eval_result=False,
@@ -128,35 +86,31 @@ class NASServer(Server):
 
         move_on_flag = True  # To record whether moving to a new training
         # round or finishing the evaluation
-
         if self.check_buffer(self.state, min_received_num, check_eval_result):
             if not check_eval_result:
                 # Receiving enough feedback in the training process
                 aggregated_num = self._perform_federated_aggregation()
 
-                # TODO(Variant): ---------------------------------------------------------------------------------------
+                # NOTE(Variant): ---------------------------------------------------------------------------------------
                 # before distill_trainer, test the aggregated parameter
                 self.eval_supernet(DISPLAY="Server supernet(agg)", mode=MODE.TEST, spec_subnet=["min"])
 
-                # execute distillation for supernet
-                if self.state >= self.train_after_round:
-                    # train supernet model
-                    _, _, results = self.trainer.train()  # return: num_samples, model_para, results_raw
-                    # save train results (train results is calculated based on ensemble models' soft logit)
-                    train_log_res = self._monitor.format_eval_res(
-                        results,
-                        rnd=self.state,
-                        role='Supernet(teacher) #{}'.format(self.ID),
-                        return_raw=True)
-                    logger.info(train_log_res)
-                    if self._cfg.wandb.use and self._cfg.wandb.server_train_info:
-                        self._monitor.save_formatted_results(train_log_res,
-                                                             save_file_name="")
-                    # save server model
-                    torch.save({'cur_round': self.state, 'model': self.model.state_dict()},
-                               os.path.join(self._cfg.outdir, f"supernet.pth"))
+                _, _, results = self.trainer.train()  # return: num_samples, model_para, results_raw
+                # save train results (train results is calculated based on ensemble models' soft logit)
+                train_log_res = self._monitor.format_eval_res(
+                    results,
+                    rnd=self.state,
+                    role='Supernet(teacher) #{}'.format(self.ID),
+                    return_raw=True)
+                logger.info(train_log_res)
+                if self._cfg.wandb.use and self._cfg.wandb.server_train_info:
+                    self._monitor.save_formatted_results(train_log_res,
+                                                         save_file_name="")
+                # save server model
+                torch.save({'cur_round': self.state, 'model': self.model.state_dict()},
+                           os.path.join(self._cfg.outdir, f"supernet.pth"))
+                # NOTE(Variant): ---------------------------------------------------------------------------------------
 
-                # TODO(Variant): ---------------------------------------------------------------------------------------
                 self.state += 1
                 if self.state % self._cfg.eval.freq == 0 and self.state != \
                         self.total_round_num:
@@ -177,7 +131,7 @@ class NASServer(Server):
 
                     # NOTE(Variant): Clean cached client models
                     for model_idx in range(self.model_num):
-                        self.cached_client_models[model_idx] = list()
+                        self.cached_client_models[model_idx].clear()  # very important!
 
                     # Start a new training round
                     self._start_new_training_round(aggregated_num)
@@ -483,8 +437,7 @@ class NASServer(Server):
             self.state += 1
 
 
-
-class NASClient(Client):
+class NASClient(EnhanceClient):
     def __init__(self,
                  ID=-1,
                  server_id=None,
@@ -498,29 +451,8 @@ class NASClient(Client):
                  *args,
                  **kwargs):
 
-        cfg = copy.deepcopy(config)
-        cfg.merge_from_other_cfg(cfg.client_trainer_specified, check_cfg=False)  # 修正data training或eval相关的参数
-
-        # save client_config.yaml begin!
-        from pathlib import Path
-        Path(cfg.outdir).mkdir(parents=True, exist_ok=True)
-        with open(os.path.join(cfg.outdir, "client_config.yaml"), 'w') as outfile:
-            from contextlib import redirect_stdout
-            with redirect_stdout(outfile):
-                tmp_cfg = copy.deepcopy(cfg)
-                tmp_cfg.clear_aux_info()
-                print(tmp_cfg.dump())
-        # save client_config.yaml end!
-
-        cfg['get_cur_state'] = self.get_cur_state
-
-        model = get_model(cfg.model, data, backend=cfg.backend)  # ignore former model, and create attentive_min_subnet
-
-        super(NASClient, self).__init__(ID, server_id, state, cfg, data, model, device, strategy, is_unseen_client,
+        super(NASClient, self).__init__(ID, server_id, state, config, data, model, device, strategy, is_unseen_client,
                                         *args, **kwargs)
-
-    def get_cur_state(self):
-        return self.state
 
     def callback_funcs_for_evaluate(self, message: Message):
         """
@@ -675,9 +607,9 @@ def eval_one_epoch(model, data_loader, num_batch_per_epoch, split='val', metrics
 
 
 def call_nas_fl_worker(method):
-    if method == 'nas_fl':
+    if method == "NAS" or method == 'nas':
         worker_builder = {'client': NASClient, 'server': NASServer}
         return worker_builder
 
 
-register_worker('nas_fl', call_nas_fl_worker)
+register_worker('NAS', call_nas_fl_worker)
