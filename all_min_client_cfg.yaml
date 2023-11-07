@@ -1,0 +1,20 @@
+criterion:
+  type: balanced_softmax  # alpha_divergence, kl_divergence
+  label_smoothing: 0
+train:
+  round_after: 0
+  batch_or_epoch: epoch
+  local_update_steps: 1
+  optimizer:
+    type: patchSGD
+    lr: 0.1
+    momentum: 0.9
+    nesterov: true
+    weight_decay: 0.0005  # TODO(Variant): how to set this value
+    weight_decay_bn_bias: 0.
+  scheduler:
+    type: warmup_cosine_scheduler
+    #      max_iters: 360 # iters, based on batch num
+    warmup_iters: 5 # epoch * num_batch_per_epoch
+    clamp_lr: 0.
+    warmup_factor: 0.0001

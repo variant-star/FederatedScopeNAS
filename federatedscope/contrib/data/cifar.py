@@ -50,6 +50,7 @@ def build_transforms(dataset, autoaugment=False, random_erase=False, cutout=Fals
 
     return train_transforms, val_transforms, test_transforms
 
+
 def load_cifar_data(config, client_cfgs=None):
 
     train_transforms, val_transforms, test_transforms = build_transforms(
@@ -80,9 +81,6 @@ def load_cifar_data(config, client_cfgs=None):
 
     fs_data = translator((all_clients_train_dataset, all_clients_val_dataset, raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
 
-    # # debug: 仅当all_clients_train_dataset与all_clients_val_dataset为空时，使得代码正常运行
-    # fs_data = translator((copy.deepcopy(raw_test_dataset), copy.deepcopy(raw_test_dataset), raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
-
     from federatedscope.core.data import ClientData
     from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
     bn_recalibration_dataset = copy.deepcopy(server_dataset)
@@ -99,6 +97,7 @@ def load_cifar_data(config, client_cfgs=None):
         fs_data[client_id]['server'] = get_dataloader(fs_data[client_id].server_data, config, 'server')
 
     return fs_data, config.clone()
+
 
 def call_cifar_data(config, client_cfgs=None):
     if config.data.type.lower().startswith("cifar"):

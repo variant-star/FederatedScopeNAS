@@ -1,0 +1,51 @@
+personalized_model_cfg: "exp/nas_fl_lr_on_cifar100_lr0.1_lstep1/sub_exp_20231103212521/client_best_infos.json"
+
+model:
+  type: attentive_subnet
+#    n_classes: 10
+  bn_momentum: 0.1
+  bn_eps: 0.00001
+  drop_out: 0.2
+  drop_connect: 0.2
+  drop_connect_only_last_two_stages: true
+trainer:
+  type: mutual_distill_trainer
+criterion:
+  type: kl_divergence # CrossEntropyLoss, balanced_softmax
+  temperature: 1.0
+  alpha: 0.5
+regularizer:
+  mu: 0.0
+  type: ''
+dataloader:
+  type: base
+  batch_size: 320
+  drop_last: false # only for train dataloader
+  shuffle: true # only for train dataloader
+  pin_memory: false
+  num_workers: 6
+train:
+  local_update_steps: 1
+  batch_or_epoch: epoch
+  optimizer:
+    type: patchSGD
+    lr: 0.1
+    momentum: 0.9
+    nesterov: true
+    weight_decay: 0.0005  # TODO(Variant): how to set this value
+    weight_decay_bn_bias: 0.
+  scheduler:
+    type: warmup_cosine_scheduler
+    #      max_iters: 360 # iters, based on batch num
+    warmup_iters: 5 # epoch * num_batch_per_epoch
+    clamp_lr: 0.
+    warmup_factor: 0.0001
+grad:
+  grad_clip: 1.0
+eval:
+  freq: 1
+  metrics: ['acc']  # 'correct', 'loss_regular'  #, 'avg_loss'
+  monitoring: []
+  split: ['test'] # 'val',
+  best_res_update_round_wise_key: 'test_acc'
+  report: ['raw']  # 'weighted_avg', 'avg', 'fairness',

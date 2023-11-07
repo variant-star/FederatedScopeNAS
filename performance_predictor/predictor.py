@@ -56,8 +56,8 @@ class JsonData:
             {
                 'flops': _['flops'],
                 'params': _['params'],
-                'loss': _['loss'],
-                'acc': _['acc']
+                'loss': _['server_recalibrate_bn_loss'],
+                'acc': _['server_recalibrate_bn_acc']
             }
             for _ in infos]
         return inputs, targets  # return type: List[numpy.array(int64)] List[Dict]
@@ -281,17 +281,20 @@ class NeuralPredictor:
 
 
 def get_imbalance(imbalance_data, n_classes, imbalance_metric):  # input_type: "Dataset" or "Subset"
-    indices = None
-    while True:
-        if hasattr(imbalance_data, "dataset"):
-            indices = imbalance_data.indices[indices] if indices is not None else imbalance_data.indices
-            imbalance_data = imbalance_data.dataset
-        else:
-            imbalance_targets = np.array(imbalance_data.targets)[indices]
-            break
-    imbalance_targets = imbalance_targets.tolist()
+    if not isinstance(imbalance_data, np.ndarray):
+        indices = None
+        while True:
+            if hasattr(imbalance_data, "dataset"):
+                indices = imbalance_data.indices[indices] if indices is not None else imbalance_data.indices
+                imbalance_data = imbalance_data.dataset
+            else:
+                imbalance_targets = np.array(imbalance_data.targets)[indices]
+                break
+        imbalance_targets = imbalance_targets.tolist()
 
-    cls_freq = np.bincount(imbalance_targets, minlength=n_classes)
+        cls_freq = np.bincount(imbalance_targets, minlength=n_classes)
+    else:
+        cls_freq = imbalance_data  # read from data_report.csv
     cls_prob = cls_freq * 1.0 / sum(cls_freq)
 
     metrics = {}
@@ -303,4 +306,8 @@ def get_imbalance(imbalance_data, n_classes, imbalance_metric):  # input_type: "
         metrics['gini'] = 1 - sum(cls_prob ** 2)
     if "cir" in imbalance_metric:
         metrics['cir'] = max(cls_freq) * 1.0 / min(cls_freq)
+    if "mean" in imbalance_metric:  # mean无意义
+        metrics['mean'] = np.mean(cls_prob)
+    if "std" in imbalance_metric:
+        metrics['std'] = np.std(cls_prob)
     return metrics
