@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class EnhanceTrainer(GeneralTorchTrainer):
     """
         1. add torch.cuda.amp,  2. enhance optimizer and lr_scheduler
+        WARNING: the easy and best practise is just like federatedscope/contrib/trainer/torch_example.py.
+                 The context manager is not necessary.
     """
     def __init__(self,
                  model,
@@ -50,6 +52,95 @@ class EnhanceTrainer(GeneralTorchTrainer):
 
         # prepare mixed precision computation
         self.ctx.scaler = GradScaler() if self.ctx.cfg.use_amp else None
+
+    def reset_hook_in_ft(self, target_trigger, target_hook_name=None):
+        """
+        modified from reset_hook_in_train. It's so weird not having this method.
+        """
+        hooks_dict = self.hooks_in_ft
+        del_one_hook_idx = self._reset_hook_in_trigger(hooks_dict,
+                                                       target_hook_name,
+                                                       target_trigger)
+        return del_one_hook_idx
+
+    def replace_hook_in_ft(self, new_hook, target_trigger,
+                           target_hook_name):
+        """
+        modified from replace_hook_in_train. It's so weird not having this method.
+        """
+        del_one_hook_idx = self.reset_hook_in_ft(
+            target_trigger=target_trigger, target_hook_name=target_hook_name)
+        self.register_hook_in_ft(new_hook=new_hook,
+                                 trigger=target_trigger,
+                                 insert_pos=del_one_hook_idx)
+
+    def evaluate(self, target_data_split_name="test", hooks_set=None, mode=MODE.TEST):
+        hooks_set = hooks_set or self.hooks_in_eval
+
+        if self.ctx.check_split(target_data_split_name, skip=True):
+            with torch.no_grad():
+                self._run_routine(mode, hooks_set, target_data_split_name)
+        else:
+            self.ctx.eval_metrics = dict()
+
+        return self.ctx.eval_metrics
+
+    def finetune(self, target_data_split_name="train", hooks_set=None):
+        """
+        modified from federatedscope.core.trainers.trainer.Trainer.finetune
+        """
+        hooks_set = hooks_set or self.hooks_in_ft
+
+        self.ctx.check_split(target_data_split_name)
+
+        num_samples = self._run_routine(MODE.FINETUNE, hooks_set,
+                                        target_data_split_name)
+        return num_samples, self.get_model_para(), self.ctx.eval_metrics
+
+    @lifecycle(LIFECYCLE.EPOCH)
+    def _run_epoch(self, hooks_set):
+        """
+        modified from federatedscope.core.trainers.trainer.Trainer._run_epoch
+        """
+        for epoch_i in range(
+                getattr(self.ctx, f"num_{self.ctx.cur_mode}_epoch")): # change self.ctx.cur_split into self.ctx.cur_mode
+            self.ctx.cur_epoch_i = CtxVar(epoch_i, "epoch")
+
+            for hook in hooks_set["on_epoch_start"]:
+                hook(self.ctx)
+
+            self._run_batch(hooks_set)
+
+            for hook in hooks_set["on_epoch_end"]:
+                hook(self.ctx)
+
+    @lifecycle(LIFECYCLE.BATCH)
+    def _run_batch(self, hooks_set):
+        """
+        modified from federatedscope.core.trainers.trainer.Trainer._run_batch
+        """
+        for batch_i in range(
+                getattr(self.ctx, f"num_{self.ctx.cur_split}_batch")): # change self.ctx.cur_split into self.ctx.cur_mode
+            self.ctx.cur_batch_i = CtxVar(batch_i, LIFECYCLE.BATCH)
+
+            for hook in hooks_set["on_batch_start"]:
+                hook(self.ctx)
+
+            for hook in hooks_set["on_batch_forward"]:
+                hook(self.ctx)
+
+            for hook in hooks_set["on_batch_backward"]:
+                hook(self.ctx)
+
+            for hook in hooks_set["on_batch_end"]:
+                hook(self.ctx)
+
+            # Break in the final epoch
+            if self.ctx.cur_mode in [
+                    MODE.TRAIN, MODE.FINETUNE
+            ] and self.ctx.cur_epoch_i == getattr(self.ctx, f"num_{self.ctx.cur_mode}_epoch") - 1:  # make changes
+                if batch_i >= getattr(self.ctx, f"num_{self.ctx.cur_split}_batch_last_epoch") - 1:  # make changes
+                    break
 
     def parse_data(self, data):
         # modified "federatedscope.core.trainers.torch_trainer.GeneralTorchTrainer"
@@ -209,17 +300,6 @@ class EnhanceTrainer(GeneralTorchTrainer):
 
     def _hook_on_batch_forward_flop_count(self, ctx):
         pass
-
-    def evaluate(self, target_data_split_name="test", hooks_set=None, mode=MODE.TEST):
-        hooks_set = hooks_set or self.hooks_in_eval
-
-        if self.ctx.check_split(target_data_split_name, skip=True):
-            with torch.no_grad():
-                self._run_routine(mode, hooks_set, target_data_split_name)
-        else:
-            self.ctx.eval_metrics = dict()
-
-        return self.ctx.eval_metrics
 
     def print_trainer_meta_info(self):
         logger.info(f"Model meta-info: {type(self.ctx.model)}.")

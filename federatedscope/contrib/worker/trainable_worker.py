@@ -9,14 +9,12 @@ from federatedscope.contrib.worker.enhance_worker import EnhanceServer, EnhanceC
 
 from federatedscope.core.auxiliaries.utils import merge_param_dict
 
-from federatedscope.contrib.trainer.ensemble_distill_trainer import EnsembleDistillTrainer
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
 # Build your worker here.
-class KEMFServer(EnhanceServer):
+class TrainableServer(EnhanceServer):
     def __init__(self,
                  ID=-1,
                  state=0,
@@ -30,11 +28,13 @@ class KEMFServer(EnhanceServer):
                  unseen_clients_id=None,
                  **kwargs):
 
-        super(KEMFServer, self).__init__(ID, state, config, data, model, client_num, total_round_num, device, strategy,
-                                         unseen_clients_id, **kwargs)
+        super(TrainableServer, self).__init__(ID, state, config, data, model, client_num, total_round_num, device, strategy,
+                                              unseen_clients_id, **kwargs)
 
-        # bind to EnsembleDistillTrainer
-        assert isinstance(self.trainer, EnsembleDistillTrainer)
+        # # The `self.trainer` has been build, change `make_global_eval` to false!
+        # self._cfg.defrost()
+        # self._cfg.federate.make_global_eval = False
+        # self._cfg.freeze(inform=False, save=False, check_cfg=False)
 
     def check_and_move_on(self,
                           check_eval_result=False,
@@ -108,10 +108,6 @@ class KEMFServer(EnhanceServer):
                     self.msg_buffer['train'][self.state] = dict()
                     self.staled_msg_buffer.clear()
 
-                    # NOTE(Variant): Clean cached client models
-                    for model_idx in range(self.model_num):
-                        self.trainers[model_idx].ensemble_models.clear()
-
                     # Start a new training round
                     self._start_new_training_round(aggregated_num)
                 else:
@@ -132,86 +128,11 @@ class KEMFServer(EnhanceServer):
 
         return move_on_flag
 
-    def _perform_federated_aggregation(self):
-        """
-        Perform federated aggregation and update the global model
-        """
-        train_msg_buffer = self.msg_buffer['train'][self.state]
-        for model_idx in range(self.model_num):
-            model = self.models[model_idx]
-            aggregator = self.aggregators[model_idx]
-            msg_list = list()
-            staleness = list()
 
-            for client_id in train_msg_buffer.keys():
-                if self.model_num == 1:
-                    msg_list.append(train_msg_buffer[client_id])
-                else:
-                    train_data_size, model_para_multiple = \
-                        train_msg_buffer[client_id]
-                    msg_list.append(
-                        (train_data_size, model_para_multiple[model_idx]))
-
-                # The staleness of the messages in train_msg_buffer
-                # should be 0
-                staleness.append((client_id, 0))
-
-            for staled_message in self.staled_msg_buffer:
-                state, client_id, content = staled_message
-                if self.model_num == 1:
-                    msg_list.append(content)
-                else:
-                    train_data_size, model_para_multiple = content
-                    msg_list.append(
-                        (train_data_size, model_para_multiple[model_idx]))
-
-                staleness.append((client_id, self.state - state))
-
-            # Trigger the monitor here (for training)
-            self._monitor.calc_model_metric(self.models[0].state_dict(),
-                                            msg_list,
-                                            rnd=self.state)
-
-            # NOTE(Variant): before aggregation, cache all client models for distillation
-            training_set_size = 0
-            for i in range(len(msg_list)):
-                sample_size, _ = msg_list[i]
-                training_set_size += sample_size
-
-            for i in range(len(msg_list)):  # recover and store the received clients' models
-                local_sample_size, local_model_para = msg_list[i]
-                weight = local_sample_size / max(training_set_size, 1)
-
-                local_model = copy.deepcopy(model)
-                # model_state_dict = local_model.state_dict()
-                # model_state_dict.update(local_model_para)
-                local_model.load_state_dict(local_model_para, strict=True)  # recover client model
-                local_model.to(self.device)
-
-                self.trainers[model_idx].ensemble_models.append(
-                    (weight, local_model)
-                )
-
-            # Aggregate
-            aggregated_num = len(msg_list)
-            agg_info = {
-                'client_feedback': msg_list,
-                'recover_fun': self.recover_fun,
-                'staleness': staleness,
-            }
-            # logger.info(f'The staleness is {staleness}')
-            result = aggregator.aggregate(agg_info)
-            # Due to lazy load, we merge two state dict
-            merged_param = merge_param_dict(model.state_dict().copy(), result)
-            model.load_state_dict(merged_param, strict=False)
-
-        return aggregated_num
-
-
-def call_kemf_worker(method):
-    if method == 'FedKEMF' or method == 'fedkemf':
-        worker_builder = {'client': EnhanceClient, 'server': KEMFServer}
+def call_trainable_worker(method):
+    if method == 'FedTrain' or method == 'fedtrain':
+        worker_builder = {'client': EnhanceClient, 'server': TrainableServer}
         return worker_builder
 
 
-register_worker('FedKEMF', call_kemf_worker)
+register_worker('FedTrain', call_trainable_worker)

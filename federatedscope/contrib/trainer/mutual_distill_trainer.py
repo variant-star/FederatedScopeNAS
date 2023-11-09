@@ -24,6 +24,7 @@ from federatedscope.core.auxiliaries.utils import param2tensor, \
 class MutualDistillTrainer(EnhanceTrainer):
     """
         distillate knowledge from 'ensemble client models' to 'nas supernet'
+        - note: only can be used in Client. (not sure the use in Server.)
     """
     def __init__(self,
                  model,
@@ -36,14 +37,19 @@ class MutualDistillTrainer(EnhanceTrainer):
 
         super(MutualDistillTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
-        aux_model_cfg = copy.deepcopy(self._cfg.model)
+        aux_model_cfg = self._cfg.model.clone()
         aux_model_cfg.defrost()
         aux_model_cfg.type = "attentive_min_subnet"
-        self.aux_model = get_model(aux_model_cfg, data, backend=self._cfg.backend)
+        self.aux_model = get_model(aux_model_cfg, local_data=None, backend=self._cfg.backend)
 
         self.replace_hook_in_train(
             self._hook_on_batch_forward_for_mutual,
             'on_batch_forward', target_hook_name='_hook_on_batch_forward')
+
+        if self._cfg.finetune.before_eval:
+            self.replace_hook_in_ft(
+                self._hook_on_batch_forward_for_mutual,
+                'on_batch_forward', target_hook_name='_hook_on_batch_forward')
 
     def _hook_on_fit_start_init(self, ctx):
         # prepare model and optimizer
