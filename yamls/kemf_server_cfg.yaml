@@ -24,7 +24,7 @@ federate:
   mode: standalone
   process_num: 1  # maybe we can use gpus >= 1
   client_num: 8
-  total_round_num: 360
+  total_round_num: 60
   sampler: uniform
 #  sample_client_rate: 1.0
   make_global_eval: true  # simulate the global eval # important!
@@ -48,24 +48,10 @@ data:
   random_erase: false
   cutout: false
 #  transform: [['ToTensor'], ['Normalize', {'mean': [0.9637], 'std': [0.1592]}]]
-finetune:
-  before_eval: false
-  batch_or_epoch: epoch
-  local_update_steps: 1
-  optimizer:
-    type: patchSGD
-    lr: 0.01
-    momentum: 0.9
-    nesterov: true
-    weight_decay: 0.00001
-    weight_decay_bn_bias: 0.
-  scheduler:
-    type: warmup_cosine_scheduler
-    warmup_iters: 0
-    clamp_lr: 0.
 # for server
 model:
   type: attentive_min_subnet
+  pretrain: ""
   #    n_classes: 10
   bn_momentum: 0.1
   bn_eps: 0.00001
@@ -83,7 +69,7 @@ regularizer:
   type: ''
 dataloader:
   type: base
-  batch_size: 320
+  batch_size: 256
   drop_last: false # only for train dataloader
   shuffle: true # only for train dataloader
   pin_memory: false
@@ -93,7 +79,7 @@ train:
   batch_or_epoch: epoch
   optimizer:
     type: patchSGD
-    lr: 0.1
+    lr: 0.08
     momentum: 0.9
     nesterov: true
     weight_decay: 0.00001

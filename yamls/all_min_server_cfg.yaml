@@ -13,14 +13,14 @@ device: 0
 #  patience: 5
 seed: 0
 federate:
-  method: BaseFL
+  method: FedTrain
   mode: standalone
   process_num: 1  # maybe we can use gpus >= 1
   client_num: 8
-  total_round_num: 360
+  total_round_num: 60
   sampler: uniform
 #  sample_client_rate: 1.0
-  make_global_eval: true  # simulate the global eval
+  make_global_eval: true  # simulate the global eval # important!
   resource_info_file: ''  # NOTE(Variant): for personalized NAS
 #fedprox:
 #  use: false
@@ -41,26 +41,12 @@ data:
   random_erase: false
   cutout: false
 #  transform: [['ToTensor'], ['Normalize', {'mean': [0.9637], 'std': [0.1592]}]]
-finetune:
-  before_eval: false
-  batch_or_epoch: epoch
-  local_update_steps: 1
-  optimizer:
-    type: patchSGD
-    lr: 0.01
-    momentum: 0.9
-    nesterov: true
-    weight_decay: 0.00001
-    weight_decay_bn_bias: 0.
-  scheduler:
-    type: warmup_cosine_scheduler
-    warmup_iters: 0
-    clamp_lr: 0.
 
 model:
   type: attentive_min_subnet
+  pretrain: ""
 #    n_classes: 10
-  bn_momentum: 0
+  bn_momentum: 0.1
   bn_eps: 0.00001
   drop_out: 0.2
   drop_connect: 0.2
@@ -85,7 +71,7 @@ train:
   local_update_steps: 1
   optimizer:
     type: patchSGD
-    lr: 0.1
+    lr: 0.08
     momentum: 0.9
     nesterov: true
     weight_decay: 0.00001
@@ -102,6 +88,6 @@ eval:
   freq: 1
   metrics: ['acc'] #, 'avg_loss'
   monitoring: []
-  split: ['test', 'train']  # for 'train' split, it has train_transform
+  split: ['test']  # for 'train' split, it has train_transform
   best_res_update_round_wise_key: 'test_acc'
   report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
