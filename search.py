@@ -3,10 +3,7 @@ import copy
 import json
 import random
 from tqdm import trange, tqdm
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-from torch.cuda.amp import GradScaler, autocast
+import thop
 
 from federatedscope.core.cmd_args import parse_args, parse_client_cfg
 from federatedscope.contrib.auxiliaries.seed_data_builder import get_seed_data
@@ -14,13 +11,11 @@ from federatedscope.core.auxiliaries.utils import setup_seed
 from federatedscope.core.auxiliaries.logging import update_logger
 from federatedscope.core.configs.config import global_cfg, CfgNode
 from federatedscope.core.auxiliaries.model_builder import get_model
-from federatedscope.core.gpu_manager import GPUManager
-from federatedscope.core.trainers.context import Context
-from federatedscope.core.data import ClientData
 
 from search_related import random_explore, evolution_search, create_and_evaluate
 
 NUM_CLIENTS = 8
+
 
 def _make_divisible(v, divisor, min_value=None):
     """
@@ -42,62 +37,18 @@ def _make_divisible(v, divisor, min_value=None):
     return new_v
 
 
-def setup_data(ctx):
-    """
-    Initialization data by ``cfg``.
-    """
-    if isinstance(ctx.data, ClientData):
-        ctx.data.setup(ctx.cfg)
+def distribute_hw_info(size, fmin=51, fmax=150):  # size 等同于 每个client的数据规模, min, max 设置为最大最小FLOPs
+    k = (fmax - fmin) / (max(size) - min(size))
+    b = fmax - k * max(size)
+    hw_infos = []
+    for x in size:
+        y = k * x + b
+        hw_infos.append(_make_divisible(y, 25))
+        print(f"client_hw_limit:{hw_infos[-1]}({y:.2f})")
+    return hw_infos
 
 
-def parse_data(data):
-    """Populate "${split}_data", "${split}_loader" and "num_${
-    split}_data" for different data splits
-    """
-    init_dict = dict()
-    if isinstance(data, dict):
-        for split in data.keys():
-            if split not in ['train', 'val', 'test', 'server']:  # TODO(Variant): new added
-                continue
-            init_dict["{}_data".format(split)] = None
-            init_dict["{}_loader".format(split)] = None
-            init_dict["num_{}_data".format(split)] = 0
-            if data.get(split, None) is not None:
-                if isinstance(data.get(split), Dataset):
-                    init_dict["{}_data".format(split)] = data.get(split)
-                    init_dict["num_{}_data".format(split)] = len(
-                        data.get(split))
-                elif isinstance(data.get(split), DataLoader):
-                    init_dict["{}_loader".format(split)] = data.get(split)
-                    init_dict["num_{}_data".format(split)] = len(
-                        data.get(split).dataset)
-                elif isinstance(data.get(split), dict):
-                    init_dict["{}_data".format(split)] = data.get(split)
-                    init_dict["num_{}_data".format(split)] = len(
-                        data.get(split)['y'])
-                else:
-                    raise TypeError("Type {} is not supported.".format(
-                        type(data.get(split))))
-    else:
-        raise TypeError("Type of data should be dict.")
-    return init_dict
-
-
-def create_general_context(cfg, model, data, device, loss_type="balanced_softmax"):
-    ctx = Context(model, cfg, data, device)  # here model is not supernet
-    # 仿照 trainer::_setup_data_related_var_in_ctx，配置ctx中默认变量
-    setup_data(ctx)
-    init_dict = parse_data(ctx.data)
-    ctx.merge_from_dict(init_dict)
-
-    # 创建 finetune criterion  # TODO(Variant): 测试是否criterion有影响
-    if loss_type == "ce":
-        ctx.criterion = torch.nn.CrossEntropyLoss(label_smoothing=0).to(ctx.device)  # 替换ctx中复杂的criterion
-
-    return ctx
-
-
-def update_specific_popu_infos(ctx, supernet, popu_json=None):
+def update_specific_popu_infos(cfg, supernet, data, popu_json=None):
 
     with open(popu_json, 'r') as f:
         saved_infos = json.load(f)
@@ -105,7 +56,7 @@ def update_specific_popu_infos(ctx, supernet, popu_json=None):
     # 循环遍历popus中所有架构 ---------------------------------------------------------------------------------------------------
     for i in trange(len(saved_infos)):
         # 构建subnet评估fitness
-        saved_infos[i] = create_and_evaluate(ctx, supernet, saved_infos[i], finetune=True)
+        saved_infos[i] = create_and_evaluate(cfg, supernet, data, saved_infos[i], finetune=True)
 
     saved_infos.sort(key=lambda x: x['flops'])
     return saved_infos
@@ -146,29 +97,28 @@ if __name__ == '__main__':
     else:
         client_cfgs = None
 
-    # federated dataset might change the number of clients
-    # thus, we allow the creation procedure of dataset to modify the global
-    # cfg object
     data, _ = get_seed_data(config=init_cfg.clone(),
                             client_cfgs=client_cfgs)
-    # init_cfg.merge_from_other_cfg(modified_cfg)
-
-    init_cfg.freeze()
-
-    cfg = init_cfg
-
-    # 权重所在子文件夹名字-------------------------------------------------------------------------------------------------
-
-    sub_path = "None"
+    init_cfg['device'] = torch.device("cuda:0")
 
     # 创建supernet-------------------------------------------------------------------------------------------------------
+    supernet = get_model(init_cfg.model, data[0], backend='torch')
 
-    gpu_manager = GPUManager(gpu_available=cfg.use_gpu,
-                             specified_device=cfg.device)
-    device = gpu_manager.auto_choice()
-    supernet = get_model(cfg.model, data[0], backend=cfg.backend).to(device)
+    inputs = torch.randn(1, 3, 32, 32)
+    supernet.sample_min_subnet()
+    min_subnet = supernet.get_active_subnet(preserve_weight=True)
+    min_subnet_flops, min_subnet_params = thop.profile(min_subnet, inputs=(inputs,), verbose=False)
+    print(f"[MIN Subnet] FLOPs:{min_subnet_flops/1e6:.2f}M, params:{min_subnet_params/1e6:.2f}M")
 
-    # 加载预训练模型------------------------------------------------------------------------------------------------------
+    supernet.sample_max_subnet()
+    max_subnet = supernet.get_active_subnet(preserve_weight=True)
+    max_subnet_flops, max_subnet_params = thop.profile(max_subnet, inputs=(inputs,), verbose=False)
+    print(f"[MAX Subnet] FLOPs:{max_subnet_flops / 1e6:.2f}M, params:{max_subnet_params / 1e6:.2f}M")
+
+    # 加载预训练模型
+    supernet.to(init_cfg.device)
+    sub_path = "exp/nas_fl_lr_on_cifar100_lr0.1_lstep1/sub_exp_20231031114136"
+
     checkpoint_path = sub_path + "/supernet.pth"
     saved_state_dict = torch.load(checkpoint_path)
     if "model" in saved_state_dict:
@@ -179,54 +129,36 @@ if __name__ == '__main__':
     print("load the checkpoint from previous training!!!")
 
     # ------------------------------------------------------------------------------------------------------------------
-    init_cfg.merge_from_other_cfg(client_cfgs.get('client_1'))  # 改变为client cfg
+    cfg = init_cfg.clone()
+    cfg.merge_from_other_cfg(client_cfgs.get('client_1'))  # 改变为client cfg
+    # cfg.freeze()
     # ------------------------------------------------------------------------------------------------------------------
 
     # 根据对search space的探索以及对每个client的数据量设定每个client的FLOPs约束，用以表征每个client个性化的环境------------------
 
-    def distribute_hw_info(size, fmin=51, fmax=150):  # size 等同于 每个client的数据规模, min, max 设置为最大最小FLOPs
-        k = (fmax - fmin) / (max(size) - min(size))
-        b = fmax - k * max(size)
-        hw_infos = []
-        for x in size:
-            y = k * x + b
-            hw_infos.append(_make_divisible(y, 25))
-            print(f"client_hw_limit:{hw_infos[-1]}({y:.2f})")
-        return hw_infos
-
     client_hw_info = distribute_hw_info([len(data[cid].train_data) for cid in range(1, NUM_CLIENTS+1)])
     client_hw_info = {id+1: hw_info*1e6 for id, hw_info in enumerate(client_hw_info)}
 
-    # 逐个client作EA search or random search-----------------------------------------------------------------------------
-    # TODO(Variant): 设置base参数 = loss or acc
-    search_type = "client"  # server, client
+    # 逐个client作EA search or random search（基于loss而非accuracy）------------------------------------------------------
+    client_best = {}
+    for cid in range(1, len(client_hw_info) + 1):
+        lotsinfos = evolution_search(cfg, supernet, data[cid], client_hw_info[cid], cid=cid)
 
-    if search_type == "server":
-        # TODO(Variant): the theoretical input data should be `data[cid]`, i change it to 'data[0]' for debug.
-        ctx = create_general_context(cfg, supernet, data[0], device, loss_type="balanced_softmax")
-        lotsinfos = random_explore(ctx, supernet, device=device)  # ignore hardware constraints with random search
-        # 保存轨迹上所有arch的信息
-        with open(f"{ctx.cfg.outdir}/server_popu_infos.json", "w") as f:
-            json.dump(lotsinfos, f, indent=4)
-    else:
-        client_best = {}
-        for cid in range(1, len(client_hw_info) + 1):
-            ctx = create_general_context(cfg, supernet, data[cid], device, loss_type="balanced_softmax")
-            lotsinfos = evolution_search(ctx, supernet, client_hw_info[cid], device=device)
-            # 保存轨迹上所有arch的信息
-            with open(f"{ctx.cfg.outdir}/client{cid}_popu_infos.json", "w") as f:
-                json.dump(lotsinfos, f, indent=4)
+        # 保存最好arch的信息
+        client_best.update({cid: copy.deepcopy(lotsinfos[0])})
+        with open(f"{cfg.outdir}/client_best_infos.json", "w") as f:
+            json.dump(client_best, f, indent=4)
 
-            # 保存最好arch的信息
-            client_best.update({cid: copy.deepcopy(lotsinfos[0])})
-            with open(f"{ctx.cfg.outdir}/client_best_infos.json", "w") as f:
-                json.dump(client_best, f, indent=4)
-
-        # # 根据server端population，更新性能
-        # for cid in range(1, len(client_hw_info) + 1):
-        #     ctx = create_general_context(cfg, supernet, data[cid], device, loss_type="balanced_softmax")
-        #     lotsinfos = update_specific_popu_infos(ctx, supernet,
-        #                                            popu_json=f"{sub_path}/server_popu_infos.json")
-        #     # 保存轨迹上所有arch的信息
-        #     with open(f"{sub_path}/client{cid}_serverpopu_infos.json", "w") as f:
-        #         json.dump(lotsinfos, f, indent=4)
+# ----------------------------------------------------------------------------------------------------------------------
+#     # Servre端作实验
+#     lotsinfos = random_explore(cfg, supernet, data[0])  # ignore hardware constraints with random search
+#     # 保存轨迹上所有arch的信息
+#     with open(f"{cfg.outdir}/server_popu_infos.json", "w") as f:
+#         json.dump(lotsinfos, f, indent=4)
+#
+#     # 根据server端population，更新性能
+#     for cid in range(1, len(client_hw_info) + 1):
+#         lotsinfos = update_specific_popu_infos(cfg, supernet, data[cid], popu_json=f"{sub_path}/server_popu_infos.json")
+#         # 保存轨迹上所有arch的信息
+#         with open(f"{sub_path}/client{cid}_serverpopu_infos.json", "w") as f:
+#             json.dump(lotsinfos, f, indent=4)
