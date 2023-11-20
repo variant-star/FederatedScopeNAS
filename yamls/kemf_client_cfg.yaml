@@ -1,4 +1,4 @@
-personalized_model_cfg: "exp/nas_fl_lr_on_cifar100_lr0.1_lstep1/sub_exp_20231103212521/client_best_infos.json"
+client_models_cfg: ""
 
 model:
   type: attentive_subnet
@@ -52,10 +52,11 @@ eval:
 finetune:
   before_eval: true
   batch_or_epoch: epoch
+  criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 20
   optimizer:
     type: patchSGD
-    lr: 0.001
+    lr: 0.01
     momentum: 0.9
     nesterov: true
     weight_decay: 0.00001

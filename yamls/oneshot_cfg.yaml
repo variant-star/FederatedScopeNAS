@@ -8,16 +8,18 @@ wandb:
 use_gpu: true
 use_amp: true
 
+client_aware_training: True
+
 device: 0
 #early_stop:
 #  patience: 5
 seed: 0
 federate:
-  method: FedTrain
+  method: OneShot
   mode: standalone
   process_num: 1  # maybe we can use gpus >= 1
   client_num: 8
-  total_round_num: 60
+  total_round_num: 240
   sampler: uniform
 #  sample_client_rate: 1.0
   make_global_eval: true  # simulate the global eval # important!
@@ -42,8 +44,9 @@ data:
   cutout: false
 #  transform: [['ToTensor'], ['Normalize', {'mean': [0.9637], 'std': [0.1592]}]]
 
+# For Server distillation to supernet (training)
 model:
-  type: attentive_min_subnet
+  type: attentive_supernet
   pretrain: ""
 #    n_classes: 10
   bn_momentum: 0.1
@@ -52,10 +55,9 @@ model:
   drop_connect: 0.2
   drop_connect_only_last_two_stages: true
 trainer:
-  type: enhance_trainer
+  type: oneshot_supernet_trainer
 criterion:
-  type: CrossEntropyLoss  # alpha_divergence, kl_divergence
-  label_smoothing: 0.1
+  type: balanced_softmax  # alpha_divergence, kl_divergence(temperature)
 regularizer:
   mu: 0.0
   type: ''
@@ -71,7 +73,7 @@ train:
   local_update_steps: 1
   optimizer:
     type: patchSGD
-    lr: 0.08
+    lr: 0.1
     momentum: 0.9
     nesterov: true
     weight_decay: 0.00001
@@ -88,6 +90,15 @@ eval:
   freq: 1
   metrics: ['acc'] #, 'avg_loss'
   monitoring: []
-  split: ['test']  # for 'train' split, it has train_transform
+  split: ['test', 'train']  # for 'train' split, it has train_transform
   best_res_update_round_wise_key: 'test_acc'
   report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
+
+supernet_arch_sampler:
+  num_arch_training: 4
+  method: 'bestup'
+  arch_to_flops_map_file_path: './attentive_nas_data/flops_archs_off_table.map'
+  discretize_step: 25
+  num_trials: 3
+
+

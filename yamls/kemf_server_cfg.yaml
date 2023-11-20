@@ -13,7 +13,7 @@ ensemble_distillation:
   type: "avg_logits"  # "avg_logits" or "max_logits"
 
 public_ground_truth:
-  enable: true
+  enable: false
 
 device: 0
 #early_stop:
@@ -38,7 +38,7 @@ personalization:
 data:
   root: data/
   type: cifar100
-  splits: [0.6, 0.2, 0.2]  # [all_clients_train_set, all_clients_val_set, server_train_set]
+  splits: [0.8, 0.1, 0.1]  # [all_clients_train_set, all_clients_val_set, server_train_set]
   splitter: lda
   splitter_args:
     - alpha: 0.5
@@ -63,7 +63,7 @@ trainer:
 criterion:
   type: kl_divergence # CrossEntropyLoss, balanced_softmax
   temperature: 1.0
-  alpha: 0.2
+  alpha: 1.0  # not work when public_ground_truth == False
 regularizer:
   mu: 0.0
   type: ''
@@ -75,8 +75,8 @@ dataloader:
   pin_memory: false
   num_workers: 6
 train:
-  local_update_steps: 1
   batch_or_epoch: epoch
+  local_update_steps: 1
   optimizer:
     type: patchSGD
     lr: 0.08

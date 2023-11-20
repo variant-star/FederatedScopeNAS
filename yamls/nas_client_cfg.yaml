@@ -49,10 +49,11 @@ eval:
 finetune:
   before_eval: false
   batch_or_epoch: epoch
+  criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 1
   optimizer:
     type: patchSGD
-    lr: 0.001
+    lr: 0.01
     momentum: 0.9
     nesterov: true
     weight_decay: 0.00001
