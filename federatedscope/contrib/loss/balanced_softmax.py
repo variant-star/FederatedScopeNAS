@@ -9,7 +9,7 @@ class BalancedSoftmax(torch.nn.modules.loss._Loss):
     Balanced Softmax Loss
     References: https://github1s.com/jiawei-ren/BalancedMetaSoftmax-Classification/blob/HEAD/loss/BalancedSoftmaxLoss.py
     """
-    def __init__(self, samples_per_class=None, label_smoothing=0):
+    def __init__(self, samples_per_class=None, label_smoothing=0, **kwargs):
         super(BalancedSoftmax, self).__init__()
         self.samples_per_class = samples_per_class
         self.label_smoothing = label_smoothing

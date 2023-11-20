@@ -58,7 +58,7 @@ class BalancedLoss(torch.nn.modules.loss._Loss):
     Returns:
       cb_loss: A float tensor representing class balanced loss
     """
-    def __init__(self, loss_type, beta=0, fl_gamma=2, samples_per_class=None):
+    def __init__(self, loss_type, beta=0, fl_gamma=2, samples_per_class=None, **kwargs):
         super(BalancedLoss, self).__init__()
 
         self.loss_type = loss_type
