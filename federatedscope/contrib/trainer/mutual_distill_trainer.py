@@ -42,15 +42,6 @@ class MutualDistillTrainer(EnhanceTrainer):
         aux_model_cfg.type = "attentive_min_subnet"
         self.aux_model = get_model(aux_model_cfg, local_data=None, backend=self._cfg.backend)
 
-        self.replace_hook_in_train(
-            self._hook_on_batch_forward_for_mutual,
-            'on_batch_forward', target_hook_name='_hook_on_batch_forward')
-
-        if self._cfg.finetune.before_eval:
-            self.replace_hook_in_ft(
-                self._hook_on_batch_forward_for_mutual,
-                'on_batch_forward', target_hook_name='_hook_on_batch_forward')
-
     def _hook_on_fit_start_init(self, ctx):
         # prepare model and optimizer
         ctx.model.to(ctx.device)
@@ -77,12 +68,13 @@ class MutualDistillTrainer(EnhanceTrainer):
             ctx.scheduler = get_scheduler(ctx.optimizer,
                                           **ctx.cfg[ctx.cur_mode].scheduler)
 
-            ctx.aux_optimizer = get_optimizer(self.aux_model,
-                                              **ctx.cfg[ctx.cur_mode].optimizer)
-            ctx.aux_scheduler = get_scheduler(ctx.aux_optimizer,
-                                              **ctx.cfg[ctx.cur_mode].scheduler)
+            if ctx.cur_mode in [MODE.FINETUNE] and ctx.cfg.finetune.criterion_base == "train":
+                ctx.aux_optimizer = get_optimizer(self.aux_model,
+                                                  **ctx.cfg[ctx.cur_mode].optimizer)
+                ctx.aux_scheduler = get_scheduler(ctx.aux_optimizer,
+                                                  **ctx.cfg[ctx.cur_mode].scheduler)
 
-            # print(ctx.optimizer.param_groups[0]['lr'])
+            print(ctx.optimizer.param_groups[0]['lr'])
 
         # TODO: the number of batch and epoch is decided by the current mode
         #  and data split, so the number of batch and epoch should be
@@ -95,7 +87,7 @@ class MutualDistillTrainer(EnhanceTrainer):
         ctx.ys_true = CtxVar([], LIFECYCLE.ROUTINE)
         ctx.ys_prob = CtxVar([], LIFECYCLE.ROUTINE)
 
-    def _hook_on_batch_forward_for_mutual(self, ctx):
+    def _hook_on_batch_forward_for_train(self, ctx):
         x, labels = [_.to(ctx.device) for _ in ctx.data_batch]
 
         # mutual learning   # TODO(Variant): 这个位置的.train .train好像不必要，在context中以change mode实现，然而这里涉及到另一个模型
@@ -115,29 +107,34 @@ class MutualDistillTrainer(EnhanceTrainer):
 
     def _hook_on_batch_backward(self, ctx):
         ctx.optimizer.zero_grad()
-        ctx.aux_optimizer.zero_grad()  # add "local aux_model"
+        if hasattr(ctx, "aux_optimizer"):
+            ctx.aux_optimizer.zero_grad()  # add "local aux_model"
 
         if ctx.cfg.use_amp:
             ctx.scaler.scale(ctx.loss_task).backward()
             if ctx.grad_clip > 0:
                 ctx.scaler.unscale_(ctx.optimizer)
-                ctx.scaler.unscale_(ctx.aux_optimizer)  # add "local aux_model"
                 torch.nn.utils.clip_grad_norm_(ctx.model.parameters(),
                                                ctx.grad_clip)
-                torch.nn.utils.clip_grad_norm_(self.aux_model.parameters(),  # add "local aux_model"
-                                               ctx.grad_clip)
+                if hasattr(ctx, "aux_optimizer"):
+                    ctx.scaler.unscale_(ctx.aux_optimizer)  # add "local aux_model"
+                    torch.nn.utils.clip_grad_norm_(self.aux_model.parameters(),  # add "local aux_model"
+                                                   ctx.grad_clip)
             ctx.scaler.step(ctx.optimizer)
-            ctx.scaler.step(ctx.aux_optimizer)  # add "local aux_model"
+            if hasattr(ctx, "aux_optimizer"):
+                ctx.scaler.step(ctx.aux_optimizer)  # add "local aux_model"
             ctx.scaler.update()
         else:
             ctx.loss_task.backward()
             if ctx.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(ctx.model.parameters(),
                                                ctx.grad_clip)
-                torch.nn.utils.clip_grad_norm_(self.aux_model.parameters(),  # add "local aux_model"
-                                               ctx.grad_clip)
+                if hasattr(ctx, "aux_optimizer"):
+                    torch.nn.utils.clip_grad_norm_(self.aux_model.parameters(),  # add "local aux_model"
+                                                   ctx.grad_clip)
             ctx.optimizer.step()
-            ctx.aux_optimizer.step()  # add "local aux_model"
+            if hasattr(ctx, "aux_optimizer"):
+                ctx.aux_optimizer.step()  # add "local aux_model"
 
         if ctx.cfg[ctx.cur_mode].batch_or_epoch == 'batch':
             ctx.scheduler.step()

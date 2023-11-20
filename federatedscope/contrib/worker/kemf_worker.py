@@ -72,7 +72,7 @@ class KEMFServer(EnhanceServer):
                 aggregated_num = self._perform_federated_aggregation()
 
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
-                self.broadcast_evaluation_in_clients()  # Preform evaluation in clients
+                self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_no_ft')  # Preform evaluation in clients
 
                 _, _, results = self.trainer.train()  # return: num_samples, model_para, results_raw
                 # save train results (train results is calculated based on ensemble models' soft logit)
@@ -118,7 +118,8 @@ class KEMFServer(EnhanceServer):
                     # Final Evaluate
                     logger.info('Server: Training is finished! Starting '
                                 'evaluation.')
-                    self.broadcast_finetune_evaluation_in_clients()  # Preform finetune evaluation in clients
+                    # self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_after_ft')  # Preform finetune evaluation in clients
+                    self.broadcast_evaluation_in_clients(msg_type='evaluate_after_ft')  # Preform finetune evaluation in clients
                     self.eval()
 
             else:

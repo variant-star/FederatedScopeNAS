@@ -15,6 +15,8 @@ from federatedscope.core.trainers.utils import format_log_hooks
 from federatedscope.core.trainers.enums import MODE, LIFECYCLE
 from federatedscope.core.trainers.context import CtxVar, lifecycle
 
+from federatedscope.core.auxiliaries.decorators import use_diff
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,12 +36,18 @@ class EnhanceTrainer(GeneralTorchTrainer):
                  monitor=None
                  ):
 
+        self.model = model
+
         super(EnhanceTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
         if only_for_eval:
             # only_for_eval => don't register hooks_train. So we change it.
             # However, this change will not display in self.print_trainer_meta_info()
             self.register_default_hooks_train()
+
+        self.replace_hook_in_train(
+            self._hook_on_batch_forward_for_train,
+            'on_batch_forward', target_hook_name='_hook_on_batch_forward')
 
         self.replace_hook_in_eval(
             self._hook_on_fit_start_init_for_evaluate,
@@ -49,6 +57,11 @@ class EnhanceTrainer(GeneralTorchTrainer):
         self.replace_hook_in_eval(
             self._hook_on_batch_forward_for_evaluate,  # normal forward, no optimizer and lr_scheduler.
             'on_batch_forward', target_hook_name='_hook_on_batch_forward')
+
+        if self._cfg.finetune.before_eval:
+            self.replace_hook_in_ft(
+                self._hook_on_batch_forward_for_finetune,
+                'on_batch_forward', target_hook_name='_hook_on_batch_forward')
 
         # prepare mixed precision computation
         self.ctx.scaler = GradScaler() if self.ctx.cfg.use_amp else None
@@ -74,6 +87,18 @@ class EnhanceTrainer(GeneralTorchTrainer):
                                  trigger=target_trigger,
                                  insert_pos=del_one_hook_idx)
 
+    @use_diff
+    def train(self, target_data_split_name="train", hooks_set=None):
+        hooks_set = hooks_set or self.hooks_in_train
+
+        if self.cfg.train.local_update_steps > 0 and self.ctx.check_split(target_data_split_name, skip=True):
+            num_samples = self._run_routine(MODE.TRAIN, hooks_set,
+                                            target_data_split_name)
+        else:
+            num_samples = 1  # set min samples = 1
+            self.ctx.eval_metrics = dict()
+        return num_samples, self.get_model_para(), self.ctx.eval_metrics
+
     def evaluate(self, target_data_split_name="test", hooks_set=None, mode=MODE.TEST):
         hooks_set = hooks_set or self.hooks_in_eval
 
@@ -91,10 +116,13 @@ class EnhanceTrainer(GeneralTorchTrainer):
         """
         hooks_set = hooks_set or self.hooks_in_ft
 
-        self.ctx.check_split(target_data_split_name)
+        if self.cfg.finetune.local_update_steps > 0 and self.ctx.check_split(target_data_split_name, skip=True):
+            num_samples = self._run_routine(MODE.FINETUNE, hooks_set,
+                                            target_data_split_name)
+        else:
+            num_samples = 1  # set min samples = 1
+            self.ctx.eval_metrics = dict()
 
-        num_samples = self._run_routine(MODE.FINETUNE, hooks_set,
-                                        target_data_split_name)
         return num_samples, self.get_model_para(), self.ctx.eval_metrics
 
     @lifecycle(LIFECYCLE.EPOCH)
@@ -200,7 +228,6 @@ class EnhanceTrainer(GeneralTorchTrainer):
                                           **ctx.cfg[ctx.cur_mode].optimizer)
             ctx.scheduler = get_scheduler(ctx.optimizer,
                                           **ctx.cfg[ctx.cur_mode].scheduler)
-            # print(ctx.optimizer.param_groups[0]['lr'])
 
         # TODO: the number of batch and epoch is decided by the current mode
         #  and data split, so the number of batch and epoch should be
@@ -213,7 +240,7 @@ class EnhanceTrainer(GeneralTorchTrainer):
         ctx.ys_true = CtxVar([], LIFECYCLE.ROUTINE)
         ctx.ys_prob = CtxVar([], LIFECYCLE.ROUTINE)
 
-    def _hook_on_batch_forward(self, ctx):
+    def _hook_on_batch_forward_for_train(self, ctx):
         x, label = [_.to(ctx.device) for _ in ctx.data_batch]
         with autocast(enabled=ctx.cfg.use_amp):
             pred = ctx.model(x)
@@ -225,6 +252,25 @@ class EnhanceTrainer(GeneralTorchTrainer):
         ctx.y_prob = CtxVar(pred, LIFECYCLE.BATCH)
         ctx.loss_batch = CtxVar(loss_batch, LIFECYCLE.BATCH)
         ctx.batch_size = CtxVar(len(label), LIFECYCLE.BATCH)
+
+    def _hook_on_batch_forward_for_evaluate(self, ctx):
+        x, label = [_.to(ctx.device) for _ in ctx.data_batch]  # NOTE(Variant): we use the true label (only for eval)
+        with autocast(enabled=ctx.cfg.use_amp):
+            prob = ctx.model(x)
+            loss_batch = F.cross_entropy(prob, label)
+        # if len(label.size()) == 0:
+        #     label = label.unsqueeze(0)
+
+        ctx.y_true = CtxVar(label, LIFECYCLE.BATCH)
+        ctx.y_prob = CtxVar(prob, LIFECYCLE.BATCH)
+        ctx.loss_batch = CtxVar(loss_batch, LIFECYCLE.BATCH)  # use the simplest cross_entropy
+        ctx.batch_size = CtxVar(len(label), LIFECYCLE.BATCH)
+
+    def _hook_on_batch_forward_for_finetune(self, ctx):
+        if ctx.cfg.finetune.criterion_base == "train":
+            return self._hook_on_batch_forward_for_train(ctx)
+        else:
+            return self._hook_on_batch_forward_for_evaluate(ctx)
 
     def _hook_on_batch_backward(self, ctx):
         ctx.optimizer.zero_grad()
@@ -260,21 +306,6 @@ class EnhanceTrainer(GeneralTorchTrainer):
         results = ctx.monitor.eval(ctx)
         setattr(ctx, 'eval_metrics', results)
 
-    # def _hook_on_fit_end(self, ctx):
-    #     ctx.ys_true = np.concatenate(ctx.ys_true) if len(ctx.ys_true) > 0 else np.array([])  # only for local_update_steps=0
-    #     ctx.ys_prob = np.concatenate(ctx.ys_prob) if len(ctx.ys_prob) > 0 else np.array([])  # only for local_update_steps=0
-    #     ctx.ys_true = CtxVar(ctx.ys_true, LIFECYCLE.ROUTINE)
-    #     ctx.ys_prob = CtxVar(ctx.ys_prob, LIFECYCLE.ROUTINE)
-    #     # 模仿分类任务评估top1 acc或correct等
-    #     if ctx.ys_true.ndim == 2:
-    #         ctx.ys_true = np.argmax(ctx.ys_true, axis=1)  # NOTE(Variant): new added
-    #
-    #     if getattr(self.ctx, f"num_{self.ctx.cur_split}_epoch") > 0:
-    #         results = ctx.monitor.eval(ctx)
-    #     else:
-    #         results = "NO DATA"
-    #     setattr(ctx, 'eval_metrics', results)
-
     def _hook_on_fit_start_init_for_evaluate(self, ctx):
         ctx.model.to(ctx.device)
 
@@ -285,20 +316,13 @@ class EnhanceTrainer(GeneralTorchTrainer):
         ctx.ys_true = CtxVar([], LIFECYCLE.ROUTINE)
         ctx.ys_prob = CtxVar([], LIFECYCLE.ROUTINE)
 
-    def _hook_on_batch_forward_for_evaluate(self, ctx):
-        x, label = [_.to(ctx.device) for _ in ctx.data_batch]  # NOTE(Variant): we use the true label (only for eval)
-        with autocast(enabled=ctx.cfg.use_amp):
-            prob = ctx.model(x)
-            loss_batch = F.cross_entropy(prob, label)
-        # if len(label.size()) == 0:
-        #     label = label.unsqueeze(0)
-
-        ctx.y_true = CtxVar(label, LIFECYCLE.BATCH)
-        ctx.y_prob = CtxVar(prob, LIFECYCLE.BATCH)
-        ctx.loss_batch = CtxVar(loss_batch, LIFECYCLE.BATCH)  # use the simplest cross_entropy
-        ctx.batch_size = CtxVar(len(label), LIFECYCLE.BATCH)
+    def _hook_on_data_parallel_init(self, ctx):
+        pass
 
     def _hook_on_batch_forward_flop_count(self, ctx):
+        pass
+
+    def _hook_on_fit_start_calculate_model_size(self, ctx):
         pass
 
     def print_trainer_meta_info(self):

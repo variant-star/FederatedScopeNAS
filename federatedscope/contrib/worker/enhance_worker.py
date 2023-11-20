@@ -58,15 +58,21 @@ class EnhanceServer(Server):
             if "state_dict" in saved_state_dict:
                 saved_state_dict = saved_state_dict["state_dict"]
             supernet.load_state_dict(saved_state_dict, strict=True)
+
             # supernet中采样模型加载权重
-            assert cfg.model.type in ["attentive_min_subnet", "attentive_subnet"]
             if cfg.model.type == "attentive_min_subnet":
                 supernet.sample_min_subnet()
-            else:
+                pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
+                torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
+            elif cfg.model.type == "attentive_subnet":
                 assert hasattr(cfg.model, 'arch_cfg')
                 supernet.set_active_subnet(**cfg.model.arch_cfg)
-            pretrained_subnet_state_dict = supernet.get_active_subnet(preserve_weight=True).state_dict()
-            model.load_state_dict(pretrained_subnet_state_dict, strict=True)
+                pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
+                torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
+            else: # "attentive_supernet"
+                pretrained = supernet
+
+            model.load_state_dict(pretrained.state_dict(), strict=True)
             print(f"Server{ID} Loaded pretrained checkpoint.")
             del supernet
 
@@ -84,10 +90,13 @@ class EnhanceServer(Server):
     def get_cur_state(self):
         return self.state
 
-    def broadcast_evaluation_in_clients(self, msg_type='evaluate_no_finetune'):
+    def no_broadcast_evaluation_in_clients(self, msg_type='no_broadcast_evaluate_no_ft'):
+        # no_broadcast_evaluate_no_ft and no_broadcast_evaluate_after_ft
         """
         modified from federatedscope.core.workers.server.Server.broadcast_model_para
         """
+        assert msg_type in ["no_broadcast_evaluate_no_ft", "no_broadcast_evaluate_after_ft"]
+
         # no model_para is broadcast.
         receiver = list(self.comm_manager.neighbors.keys())
 
@@ -102,10 +111,12 @@ class EnhanceServer(Server):
                     timestamp=self.cur_timestamp,
                     content=None))
 
-    def broadcast_finetune_evaluation_in_clients(self, msg_type='evaluate_after_finetune'):
+    def broadcast_evaluation_in_clients(self, msg_type='evaluate_no_ft'):
+        # evaluate_no_ft and evaluate_after_ft
         """
         modified from federatedscope.core.workers.server.Server.broadcast_model_para
         """
+        assert msg_type in ["evaluate_no_ft", "evaluate_after_ft"]
         # broadcast to all clients
         receiver = list(self.comm_manager.neighbors.keys())
 
@@ -168,24 +179,34 @@ class EnhanceClient(Client):
             if "state_dict" in saved_state_dict:
                 saved_state_dict = saved_state_dict["state_dict"]
             supernet.load_state_dict(saved_state_dict, strict=True)
+
             # supernet中采样模型加载权重
-            assert cfg.model.type in ["attentive_min_subnet", "attentive_subnet"]
             if cfg.model.type == "attentive_min_subnet":
                 supernet.sample_min_subnet()
-            else:
+                pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
+                torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
+            elif cfg.model.type == "attentive_subnet":
                 assert hasattr(cfg.model, 'arch_cfg')
                 supernet.set_active_subnet(**cfg.model.arch_cfg)
-            pretrained_subnet_state_dict = supernet.get_active_subnet(preserve_weight=True).state_dict()
-            model.load_state_dict(pretrained_subnet_state_dict, strict=True)
+                pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
+                torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
+            else: # "attentive_supernet"
+                pretrained = supernet
+
+            model.load_state_dict(pretrained.state_dict(), strict=True)
             print(f"Client{ID} Loaded pretrained checkpoint.")
             del supernet
 
         super(EnhanceClient, self).__init__(ID, server_id, state, cfg, data, model, device, strategy, is_unseen_client,
                                             *args, **kwargs)
 
-        self.register_handlers('evaluate_no_finetune', self.callback_funcs_for_evaluate_no_finetune,
+        self.register_handlers('no_broadcast_evaluate_no_ft', self.callback_funcs_for_evaluate_no_finetune,
                                ['metrics'])
-        self.register_handlers('evaluate_after_finetune', self.callback_funcs_for_evaluate_after_finetune,
+        self.register_handlers('evaluate_no_ft', self.callback_funcs_for_evaluate_no_finetune,
+                               ['metrics'])
+        self.register_handlers('no_broadcast_evaluate_after_ft', self.callback_funcs_for_evaluate_after_finetune,
+                               ['metrics'])
+        self.register_handlers('evaluate_after_ft', self.callback_funcs_for_evaluate_after_finetune,
                                ['metrics'])
 
         # transport other enhanced args
@@ -203,9 +224,15 @@ class EnhanceClient(Client):
         sender, timestamp = message.sender, message.timestamp
         self.state = message.state
 
-        # save client model
-        torch.save({'round': self.state, 'model': self.model.state_dict()},
-                   os.path.join(self._cfg.outdir, 'checkpoints', f"client{self.ID}_model.pth"))
+        if message.content is not None:  # evaluate_no_ft
+            self.trainer.update(message.content,
+                                strict=self._cfg.federate.share_local_model)
+        else:  # no_broadcast_evaluate_no_ft,
+            # save client model
+            torch.save({'round': self.state, 'model': self.model.state_dict()},
+                       os.path.join(self._cfg.outdir, 'checkpoints', f"client{self.ID}_model.pth"))
+
+        # if self._cfg.finetune.before_eval:
 
         metrics = {}
         for split in self._cfg.eval.split:
@@ -218,7 +245,7 @@ class EnhanceClient(Client):
         formatted_eval_res = self._monitor.format_eval_res(
             metrics,
             rnd=self.state,
-            role='Client #{}'.format(self.ID),
+            role=f'Client #{self.ID}({message.msg_type})',
             forms=['raw'],
             return_raw=True)
         logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
@@ -248,9 +275,11 @@ class EnhanceClient(Client):
         sender, timestamp = message.sender, message.timestamp
         self.state = message.state
 
-        if message.content is not None:
+        if message.content is not None:  # evaluate_after_ft
             self.trainer.update(message.content,
                                 strict=self._cfg.federate.share_local_model)
+        else:  # no_broadcast_evaluate_after_ft
+            pass
 
         metrics = {}
         if self._cfg.finetune.before_eval:
@@ -261,7 +290,7 @@ class EnhanceClient(Client):
             finetune_log_res = self._monitor.format_eval_res(
                 results,
                 rnd=self.state,
-                role='Client #{}(w/ FT)'.format(self.ID),
+                role=f'Client #{self.ID}(w/ FT)({message.msg_type})',
                 return_raw=True)
             logger.info(finetune_log_res)  # NOTE(Variant): add this to output
             if self._cfg.wandb.use and self._cfg.wandb.client_train_info:
@@ -281,7 +310,7 @@ class EnhanceClient(Client):
         formatted_eval_res = self._monitor.format_eval_res(
             metrics,
             rnd=self.state,
-            role='Client #{}(w/ FT)'.format(self.ID),
+            role=f'Client #{self.ID}(w/ FT)({message.msg_type})',
             forms=['raw'],
             return_raw=True)
         logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
