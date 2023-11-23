@@ -6,6 +6,9 @@ import torchvision.datasets as datasets
 from federatedscope.register import register_data
 from federatedscope.core.data.base_translator import BaseDataTranslator
 
+from federatedscope.core.data import ClientData
+from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
+
 import copy
 
 
@@ -81,17 +84,12 @@ def load_cifar_data(config, client_cfgs=None):
 
     fs_data = translator((all_clients_train_dataset, all_clients_val_dataset, raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
 
-    from federatedscope.core.data import ClientData
-    from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
     bn_recalibration_dataset = copy.deepcopy(server_dataset)
     bn_recalibration_dataset.dataset.transform = train_transforms  # 若改为 test_transform， calibrate bn 性能较差
 
     fs_data[0] = ClientData(config, train=server_dataset, val=bn_recalibration_dataset, test=raw_test_dataset)
 
-    for client_id in range(1, config.federate.client_num + 1):
-        # fs_data[client_id].val_data = copy.deepcopy(bn_recalibration_dataset)  # the bn_recalibration_dataset(server data)
-        # # fs_data[client_id].setup(config)  # NOTE(Variant): config not change, so setup() func not work.
-        # fs_data[client_id]['val'] = get_dataloader(fs_data[client_id].val_data, config, 'val')
+    for client_id in range(config.federate.client_num + 1):  # server is also included.
         # NOTE(Variant): 额外添加bn_recalibration_dataset
         fs_data[client_id].server_data = copy.deepcopy(bn_recalibration_dataset)  # the bn_recalibration_dataset(server data)
         fs_data[client_id]['server'] = get_dataloader(fs_data[client_id].server_data, config, 'server')

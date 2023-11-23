@@ -46,7 +46,7 @@ class EnhanceServer(Server):
 
         # load pretrained checkpoint!
         assert model is not None
-        if cfg.model.pretrain != "":
+        if cfg.model.type.startswith("attentive") and cfg.model.pretrain != "":
             supernet_cfg = cfg.model.clone()
             supernet_cfg.defrost()
             supernet_cfg.type = "attentive_supernet"
@@ -167,7 +167,7 @@ class EnhanceClient(Client):
 
         # load pretrained checkpoint!
         assert model is not None
-        if cfg.model.pretrain != "":
+        if cfg.model.type.startswith("attentive") and cfg.model.pretrain != "":
             supernet_cfg = cfg.model.clone()
             supernet_cfg.defrost()
             supernet_cfg.type = "attentive_supernet"
@@ -190,7 +190,7 @@ class EnhanceClient(Client):
                 supernet.set_active_subnet(**cfg.model.arch_cfg)
                 pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
                 torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
-            else: # "attentive_supernet"
+            else:  # "attentive_supernet"
                 pretrained = supernet
 
             model.load_state_dict(pretrained.state_dict(), strict=True)
@@ -250,14 +250,6 @@ class EnhanceClient(Client):
             return_raw=True)
         logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
 
-        # self._monitor.update_best_result(self.best_results,
-        #                                  formatted_eval_res['Results_raw'],
-        #                                  results_type=f"client #{self.ID}")
-        # self.history_results = merge_dict_of_results(
-        #     self.history_results, formatted_eval_res['Results_raw'])
-        # self.early_stopper.track_and_check(self.history_results[
-        #     self._cfg.eval.best_res_update_round_wise_key])
-
         self.comm_manager.send(
             Message(msg_type='metrics',
                     sender=self.ID,
@@ -283,9 +275,7 @@ class EnhanceClient(Client):
 
         metrics = {}
         if self._cfg.finetune.before_eval:
-            self.trainer.finetune()
-
-            sample_size, _, results = self.trainer.train()
+            sample_size, _, results = self.trainer.finetune()
 
             finetune_log_res = self._monitor.format_eval_res(
                 results,
@@ -293,9 +283,6 @@ class EnhanceClient(Client):
                 role=f'Client #{self.ID}(w/ FT)({message.msg_type})',
                 return_raw=True)
             logger.info(finetune_log_res)  # NOTE(Variant): add this to output
-            if self._cfg.wandb.use and self._cfg.wandb.client_train_info:
-                self._monitor.save_formatted_results(finetune_log_res,
-                                                     save_file_name="")
 
         # save client model
         torch.save({'round': self.state, 'model': self.model.state_dict()},
@@ -315,14 +302,6 @@ class EnhanceClient(Client):
             return_raw=True)
         logger.info(formatted_eval_res)  # NOTE(Variant): add this to output
 
-        # self._monitor.update_best_result(self.best_results,
-        #                                  formatted_eval_res['Results_raw'],
-        #                                  results_type=f"client #{self.ID}")
-        # self.history_results = merge_dict_of_results(
-        #     self.history_results, formatted_eval_res['Results_raw'])
-        # self.early_stopper.track_and_check(self.history_results[
-        #     self._cfg.eval.best_res_update_round_wise_key])
-
         self.comm_manager.send(
             Message(msg_type='metrics',
                     sender=self.ID,
@@ -340,39 +319,17 @@ class EnhanceClient(Client):
         timestamp = message.timestamp
         content = message.content
 
-        # When clients share the local model, we must set strict=True to
-        # ensure all the model params (which might be updated by other
-        # clients in the previous local training process) are overwritten
-        # and synchronized with the received model
-        if self._cfg.federate.process_num > 1:
-            for k, v in content.items():
-                content[k] = v.to(self.device)
-        self.trainer.update(content,
-                            strict=self._cfg.federate.share_local_model)
+        self.trainer.update(content, strict=True)
         self.state = round
-
-        if self.early_stopper.early_stopped and \
-                self._monitor.local_convergence_round == 0:
-            logger.info(
-                f"[Normal FL Mode] Client #{self.ID} has been locally "
-                f"early stopped. "
-                f"The next FL update may result in negative effect")
-            self._monitor.local_converged()
 
         sample_size, model_para_all, results = self.trainer.train()
 
-        if self._cfg.federate.share_local_model and not \
-                self._cfg.federate.online_aggr:
-            model_para_all = copy.deepcopy(model_para_all)
         train_log_res = self._monitor.format_eval_res(
             results,
             rnd=self.state,
             role='Client #{}'.format(self.ID),
             return_raw=True)
         logger.info(train_log_res)
-        if self._cfg.wandb.use and self._cfg.wandb.client_train_info:
-            self._monitor.save_formatted_results(train_log_res,
-                                                 save_file_name="")
 
         # Return the feedbacks to the server after local update
         self.comm_manager.send(

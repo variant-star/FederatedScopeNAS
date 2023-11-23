@@ -35,7 +35,7 @@ class EnsembleDistillTrainer(EnhanceTrainer):
 
         # ensemble_distillation
         ens_logits = calculate_ensemble_logits(
-            x, self.ensemble_models, ctx.cfg.use_amp, ctx.cfg.ensemble_distillation.type
+            x, self.ensemble_models, ctx.cfg.ensemble_distillation.type
         )
 
         # ensemble training

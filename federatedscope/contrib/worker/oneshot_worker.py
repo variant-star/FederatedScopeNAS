@@ -3,16 +3,13 @@ import copy
 import torch
 import torch.nn as nn
 import os
-import sys
-import numpy as np
-from torch.cuda.amp import GradScaler, autocast
+
+from functools import partial
 
 from federatedscope.register import register_worker
 from federatedscope.contrib.worker.enhance_worker import EnhanceServer, EnhanceClient
+from federatedscope.contrib.worker.nas_worker import eval_supernet
 
-from federatedscope.core.auxiliaries.utils import merge_param_dict
-
-from federatedscope.core.trainers.enums import MODE
 
 OVERWRITE = False
 
@@ -37,6 +34,8 @@ class OneShotServer(EnhanceServer):
 
         super(OneShotServer, self).__init__(ID, state, config, data, model, client_num, total_round_num, device, strategy,
                                             unseen_clients_id, **kwargs)
+
+        self.eval_supernet = partial(eval_supernet, self)
 
     def check_and_move_on(self,
                           check_eval_result=False,
@@ -123,57 +122,6 @@ class OneShotServer(EnhanceServer):
             move_on_flag = False
 
         return move_on_flag
-
-    def eval_supernet(self, DISPLAY="Supernet", spec_subnet="random", recalibrate_bn=False, mode=None):
-
-        if spec_subnet == "min":
-            self.model.sample_min_subnet()
-        elif spec_subnet == "max":
-            self.model.sample_max_subnet()
-        else:
-            self.model.sample_active_subnet()
-
-        subnet = self.model.get_active_subnet(preserve_weight=True)
-        subnet.to(self.device)
-
-        metrics = {}
-        if recalibrate_bn:
-            torch.optim.swa_utils.update_bn(self.data["server"], subnet, device=self.device)
-
-        run_mode = mode or (MODE.TEST if recalibrate_bn else MODE.TRAIN)  # 若指定mode，即测试supernet(agg)
-
-        for split in self._cfg.eval.split:
-            results = fast_eval(subnet, self.data[split], device=self.device, use_amp=self._cfg.use_amp,
-                                mode=run_mode, header=split)
-            metrics.update(results)
-
-        formatted_eval_res = self._monitor.format_eval_res(
-            metrics,
-            rnd=self.state,
-            role=f'{DISPLAY}({spec_subnet}){"(MODE.TEST)" if run_mode == MODE.TEST else "(MODE.TRAIN)"} #',
-            forms=self._cfg.eval.report,
-            return_raw=True)
-
-        self._monitor.save_formatted_results(formatted_eval_res)
-        logger.info(formatted_eval_res)
-
-
-def fast_eval(model, loader, device, use_amp=True, mode=MODE.TEST, header="NULL"):
-    y_true, y_pred = [], []
-    with torch.no_grad():
-        model.eval() if mode == MODE.TEST else model.train()
-        for inputs, labels in loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            with autocast(enabled=use_amp):
-                y_logits = model(inputs)
-
-            y_true.append(labels.cpu().numpy())
-            y_pred.append(np.argmax(y_logits.cpu().numpy(), axis=-1))
-
-        y_true = np.concatenate(y_true)
-        y_pred = np.concatenate(y_pred)
-
-    return {f'{header}_acc': np.sum(y_true == y_pred) / len(y_true), f'{header}_total': len(y_true)}
 
 
 def call_oneshot_fl_worker(method):

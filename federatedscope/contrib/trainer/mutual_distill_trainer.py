@@ -74,8 +74,6 @@ class MutualDistillTrainer(EnhanceTrainer):
                 ctx.aux_scheduler = get_scheduler(ctx.aux_optimizer,
                                                   **ctx.cfg[ctx.cur_mode].scheduler)
 
-            print(ctx.optimizer.param_groups[0]['lr'])
-
         # TODO: the number of batch and epoch is decided by the current mode
         #  and data split, so the number of batch and epoch should be
         #  initialized at the beginning of the routine
@@ -141,6 +139,10 @@ class MutualDistillTrainer(EnhanceTrainer):
         else:  # batch_or_epoch == 'epoch'
             if ctx.cur_batch_i == getattr(ctx, f"num_{self.ctx.cur_split}_batch") - 1:
                 ctx.scheduler.step()
+
+    def _hook_on_fit_end_for_train_mode_recalibrate_bn(self, ctx):
+        torch.optim.swa_utils.update_bn(ctx.data['server'], ctx.model, ctx.device)
+        torch.optim.swa_utils.update_bn(ctx.data['server'], self.aux_model, ctx.device)
 
     def get_model_para(self):  # change "local ctx.model" to "local aux_model"
         if self.cfg.federate.process_num > 1:

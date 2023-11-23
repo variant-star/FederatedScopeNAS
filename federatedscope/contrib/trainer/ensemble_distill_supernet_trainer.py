@@ -29,11 +29,6 @@ class EnsembleDistillSupernetTrainer(EnhanceTrainer):
 
         super(EnsembleDistillSupernetTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
-        # self.register_hook_in_train(self._hook_on_fit_start_save_paras, "on_fit_start",
-        #                             insert_pos=-1)
-        # self.register_hook_in_train(self._hook_on_batch_end_recover_paras, "on_batch_end",
-        #                             insert_pos=-1)
-
         self.ensemble_models = []  # alloc memory for cached ensemble models
 
     def _hook_on_batch_forward_for_train(self, ctx):
@@ -42,7 +37,7 @@ class EnsembleDistillSupernetTrainer(EnhanceTrainer):
 
         # ensemble_distillation
         ens_logits = calculate_ensemble_logits(
-            x, self.ensemble_models, ctx.cfg.use_amp, ctx.cfg.ensemble_distillation.type
+            x, self.ensemble_models, ctx.cfg.ensemble_distillation.type
         ) if ctx.cfg.ensemble_distillation.enable else None
 
         # inplace_distillation
@@ -101,15 +96,6 @@ class EnsembleDistillSupernetTrainer(EnhanceTrainer):
         ctx.y_prob = CtxVar(prob[0], LIFECYCLE.BATCH)
         ctx.loss_batch = CtxVar(sum(loss_batch), LIFECYCLE.BATCH)
         ctx.batch_size = CtxVar(len(prob[0]), LIFECYCLE.BATCH)
-
-    # def _hook_on_fit_start_save_paras(self, ctx):  # trigger: "on_fit_start" at the very beginning
-    #     if self.get_cur_state() < ctx.cfg.freeze_min_subnet_round:
-    #         ctx.model.sample_min_subnet()
-    #         ctx.saved_min_subnet = ctx.model.get_active_subnet(preserve_weight=True)
-    #
-    # def _hook_on_batch_end_recover_paras(self, ctx):  # trigger: "on_batch_end" at the very last
-    #     if self.get_cur_state() < ctx.cfg.freeze_min_subnet_round:
-    #         ctx.model.load_weights_from_pretrained_submodel(ctx.saved_min_subnet.state_dict())
 
 
 def calculate_mixed_loss(ctx, pred, labels=None, inplace_y_logits=None, ensemble_y_logits=None):
