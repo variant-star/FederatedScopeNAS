@@ -1,6 +1,7 @@
+client_models_cfg: ""
+
 model:
   type: attentive_min_subnet
-#    n_classes: 10
   bn_momentum: 0.1
   bn_eps: 0.00001
   drop_out: 0.2
@@ -10,10 +11,7 @@ trainer:
   type: enhance_trainer
 criterion:
   type: balanced_softmax # CrossEntropyLoss, balanced_softmax
-  label_smoothing: 0
-regularizer:
-  mu: 0.0
-  type: ''
+  label_smoothing: 0.0
 dataloader:
   type: base
   batch_size: 320
@@ -23,6 +21,7 @@ dataloader:
   num_workers: 6
 train:
   batch_or_epoch: epoch
+  recalibrate_bn: true
   local_update_steps: 1
   optimizer:
     type: patchSGD
@@ -33,7 +32,7 @@ train:
     weight_decay_bn_bias: 0.
   scheduler:
     type: warmup_cosine_scheduler
-    #      max_iters: 360 # iters, based on batch num
+    # max_iters: 360 # iters, based on batch num
     warmup_iters: 5 # epoch * num_batch_per_epoch
     clamp_lr: 0.
     warmup_factor: 0.0001
@@ -46,11 +45,12 @@ eval:
   split: ['test'] # 'val',
   best_res_update_round_wise_key: 'test_acc'
   report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
-finetune:
+finetune:  # only work for searching
   before_eval: false
+  recalibrate_bn: true
   batch_or_epoch: epoch
   criterion_base: "eval"  # "train" or "eval"
-  local_update_steps: 1
+  local_update_steps: 20
   optimizer:
     type: patchSGD
     lr: 0.01

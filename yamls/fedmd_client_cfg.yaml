@@ -8,11 +8,17 @@ model:
   drop_connect: 0.2
   drop_connect_only_last_two_stages: true
 trainer:
-  type: mutual_distill_trainer
+  type: fedmd_trainer
 criterion:
-  type: kl_divergence # CrossEntropyLoss, balanced_softmax
-  temperature: 1.0
-  alpha: 0.5
+  type: balanced_softmax # CrossEntropyLoss, balanced_softmax
+  label_smoothing: 0.0
+dataloader:
+  type: base
+  batch_size: 256
+  drop_last: false # only for train dataloader
+  shuffle: true # only for train dataloader
+  pin_memory: false
+  num_workers: 6
 train:
   local_update_steps: 1
   recalibrate_bn: true
