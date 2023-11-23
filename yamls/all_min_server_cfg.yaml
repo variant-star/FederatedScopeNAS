@@ -1,0 +1,81 @@
+use_gpu: true
+use_amp: true
+
+ensemble_distillation:
+#  enable: true  # default: True
+  type: "avg_logits"  # "avg_logits" or "max_logits"
+
+public_ground_truth:
+  enable: false
+
+device: 0
+seed: 0
+federate:
+  method: FedTrain
+  mode: standalone
+  process_num: 1  # maybe we can use gpus >= 1
+  client_num: 8
+  total_round_num: 120
+  make_global_eval: true  # simulate the global eval # important!
+personalization:
+  local_param: []
+  share_non_trainable_para: true
+data:
+  root: data/
+  type: cifar100
+  splits: [0.8, 0.1, 0.1]  # [all_clients_train_set, all_clients_val_set, server_train_set]
+  splitter: lda
+  splitter_args:
+    - alpha: 0.5
+#  subsample: 0.05
+  consistent_label_distribution: true
+  autoaugment: true
+  random_erase: false
+  cutout: false
+model:
+  type: attentive_min_subnet
+  pretrain: ""
+  bn_momentum: 0.1
+  bn_eps: 0.00001
+  drop_out: 0.2
+  drop_connect: 0.2
+  drop_connect_only_last_two_stages: true
+trainer:
+  type: ensemble_distill_trainer
+criterion:
+  type: kl_divergence # CrossEntropyLoss, balanced_softmax
+  temperature: 1.0
+  alpha: 1.0  # not work when public_ground_truth == False
+dataloader:
+  type: base
+  batch_size: 256
+  drop_last: false # only for train dataloader
+  shuffle: true # only for train dataloader
+  pin_memory: false
+  num_workers: 6
+train:
+  batch_or_epoch: epoch
+  recalibrate_bn: false
+  local_update_steps: 0
+  optimizer:
+    type: patchSGD
+    lr: 0.08
+    momentum: 0.9
+    nesterov: true
+    weight_decay: 0.00001
+    weight_decay_bn_bias: 0.
+  scheduler:
+    type: warmup_cosine_scheduler
+    # max_iters: 360 # iters, based on batch num
+    warmup_iters: 5 # epoch * num_batch_per_epoch
+    clamp_lr: 0.
+    warmup_factor: 0.0001
+grad:
+  grad_clip: 1.0
+eval:
+  freq: 1
+  metrics: ['acc']  # 'correct', 'loss_regular'  #, 'avg_loss'
+  monitoring: []
+  split: ['test'] # 'val',
+  best_res_update_round_wise_key: 'test_acc'
+  report: ['raw']  # 'weighted_avg', 'avg', 'fairness',

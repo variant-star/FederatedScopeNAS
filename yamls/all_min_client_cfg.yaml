@@ -1,10 +1,13 @@
 client_models_cfg: ""
 
+trainer:
+  type: enhance_trainer
 criterion:
   type: balanced_softmax  # alpha_divergence, kl_divergence
-  label_smoothing: 0
+  label_smoothing: 0.0
 train:
   batch_or_epoch: epoch
+  recalibrate_bn: true
   local_update_steps: 1
   optimizer:
     type: patchSGD
@@ -15,13 +18,14 @@ train:
     weight_decay_bn_bias: 0.
   scheduler:
     type: warmup_cosine_scheduler
-    #      max_iters: 360 # iters, based on batch num
+    # max_iters: 360 # iters, based on batch num
     warmup_iters: 5 # epoch * num_batch_per_epoch
     clamp_lr: 0.
     warmup_factor: 0.0001
 finetune:
   before_eval: true
   batch_or_epoch: epoch
+  recalibrate_bn: true
   criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 20
   optimizer:
