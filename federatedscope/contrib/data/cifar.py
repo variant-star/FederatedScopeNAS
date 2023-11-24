@@ -84,15 +84,26 @@ def load_cifar_data(config, client_cfgs=None):
 
     fs_data = translator((all_clients_train_dataset, all_clients_val_dataset, raw_test_dataset))  # raw_test_dataset will be divided into #client_num parts
 
-    bn_recalibration_dataset = copy.deepcopy(server_dataset)
-    bn_recalibration_dataset.dataset.transform = train_transforms  # 若改为 test_transform， calibrate bn 性能较差
+    server_val_dataset = copy.deepcopy(server_dataset)
+    server_val_dataset.dataset.transform = test_transforms
 
-    fs_data[0] = ClientData(config, train=server_dataset, val=bn_recalibration_dataset, test=raw_test_dataset)
+    bn_recalibration_dataset = dict()
+    bn_recalibration_dataset['train_version'] = copy.deepcopy(server_dataset)
+    bn_recalibration_dataset['train_version'].dataset.transform = train_transforms  # 若改为 test_transform， calibrate bn 性能较差
+    bn_recalibration_dataset['test_version'] = copy.deepcopy(server_dataset)
+    bn_recalibration_dataset['test_version'].dataset.transform = test_transforms
+
+    fs_data[0] = ClientData(config, train=server_dataset, val=server_val_dataset, test=raw_test_dataset)
 
     for client_id in range(config.federate.client_num + 1):  # server is also included.
         # NOTE(Variant): 额外添加bn_recalibration_dataset
-        fs_data[client_id].server_data = copy.deepcopy(bn_recalibration_dataset)  # the bn_recalibration_dataset(server data)
+        # the bn_recalibration_dataset(server data): train_transform_version
+        fs_data[client_id].server_data = copy.deepcopy(bn_recalibration_dataset['train_version'])
         fs_data[client_id]['server'] = get_dataloader(fs_data[client_id].server_data, config, 'server')
+        # the bn_recalibration_dataset(server data): test_transform_version
+        # fs_data[client_id].server_data = copy.deepcopy(bn_recalibration_dataset['test_version'])
+        # fs_data[client_id]['server_test'] = get_dataloader(fs_data[client_id].server_test_data, config, 'server')
+
 
     return fs_data, config.clone()
 

@@ -255,27 +255,6 @@ class NASServer(EnhanceServer):  # actually, it should inherit from KEMFServer
             # restore the state of the unseen clients within sampler
             self.sampler.change_state(self.unseen_clients_id, 'seen')
 
-    def terminate(self, msg_type='finish'):
-        """
-        To terminate the FL course
-        """
-        self.is_finish = True
-
-        # model_para = self.models[0].state_dict()
-        self.models[0].sample_min_subnet()
-        min_subnet = self.models[0].get_active_subnet(preserve_weight=True)
-        model_para = min_subnet.state_dict()
-
-        self._monitor.finish_fl()
-
-        self.comm_manager.send(
-            Message(msg_type=msg_type,
-                    sender=self.ID,
-                    receiver=list(self.comm_manager.neighbors.keys()),
-                    state=self.state,
-                    timestamp=self.cur_timestamp,
-                    content=model_para))
-
 
 def eval_supernet(self, DISPLAY="Supernet", spec_subnet="random", recalibrate_bn=False):
 

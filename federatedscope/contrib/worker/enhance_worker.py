@@ -69,7 +69,7 @@ class EnhanceServer(Server):
                 supernet.set_active_subnet(**cfg.model.arch_cfg)
                 pretrained = supernet.get_active_subnet(preserve_weight=True).to(device)
                 torch.optim.swa_utils.update_bn(data['server'], pretrained, device=device)  # recalibrate_bn
-            else: # "attentive_supernet"
+            else:  # "attentive_supernet"
                 pretrained = supernet
 
             model.load_state_dict(pretrained.state_dict(), strict=True)
@@ -135,6 +135,19 @@ class EnhanceServer(Server):
                     state=min(rnd, self.total_round_num),
                     timestamp=self.cur_timestamp,
                     content=model_para))
+
+    def terminate(self, msg_type='finish'):
+        self.is_finish = True
+
+        self._monitor.finish_fl()
+
+        self.comm_manager.send(
+            Message(msg_type=msg_type,
+                    sender=self.ID,
+                    receiver=list(self.comm_manager.neighbors.keys()),
+                    state=self.state,
+                    timestamp=self.cur_timestamp,
+                    content=None))
 
 
 class EnhanceClient(Client):
@@ -284,9 +297,9 @@ class EnhanceClient(Client):
                 return_raw=True)
             logger.info(finetune_log_res)  # NOTE(Variant): add this to output
 
-        # save client model
-        torch.save({'round': self.state, 'model': self.model.state_dict()},
-                   os.path.join(self._cfg.outdir, 'checkpoints', f"client{self.ID}_finetune_model.pth"))
+            # save client model
+            torch.save({'round': self.state, 'model': self.model.state_dict()},
+                       os.path.join(self._cfg.outdir, 'checkpoints', f"client{self.ID}_finetune_model.pth"))
 
         for split in self._cfg.eval.split:
             # TODO: The time cost of evaluation is not considered here
@@ -341,6 +354,10 @@ class EnhanceClient(Client):
                         init_timestamp=timestamp,
                         instance_number=sample_size),
                     content=(sample_size, model_para_all)))
+
+    def callback_funcs_for_finish(self, message: Message):
+        logger.info(f"================= client {self.ID} received finish message =================")
+        self._monitor.finish_fl()
 
 
 def call_enhance_fl_worker(method):
