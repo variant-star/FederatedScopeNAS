@@ -15,7 +15,7 @@ criterion:
   alpha: 0.5
 train:
   local_update_steps: 1
-  recalibrate_bn: true
+  recalibrate_bn: false
   batch_or_epoch: epoch
   optimizer:
     type: patchSGD
@@ -40,9 +40,9 @@ eval:
   best_res_update_round_wise_key: 'test_acc'
   report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
 finetune:
-  before_eval: true
+  before_eval: false
   batch_or_epoch: epoch
-  recalibrate_bn: true
+  recalibrate_bn: false
   criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 20
   optimizer:

@@ -14,7 +14,7 @@ criterion:
   label_smoothing: 0.0
 train:
   batch_or_epoch: epoch
-  recalibrate_bn: true
+  recalibrate_bn: false
   local_update_steps: 1
   optimizer:
     type: patchSGD
@@ -30,9 +30,9 @@ train:
     clamp_lr: 0.
     warmup_factor: 0.0001
 finetune:
-  before_eval: true
+  before_eval: false
   batch_or_epoch: epoch
-  recalibrate_bn: true
+  recalibrate_bn: false
   criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 20
   optimizer:

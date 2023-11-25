@@ -14,7 +14,6 @@ federate:
   method: FedKEMF
   mode: standalone
   process_num: 1  # maybe we can use gpus >= 1
-  client_num: 8
   total_round_num: 120
   make_global_eval: true  # simulate the global eval # important!
 personalization:

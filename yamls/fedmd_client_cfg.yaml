@@ -12,16 +12,9 @@ trainer:
 criterion:
   type: balanced_softmax # CrossEntropyLoss, balanced_softmax
   label_smoothing: 0.0
-dataloader:
-  type: base
-  batch_size: 256
-  drop_last: false # only for train dataloader
-  shuffle: true # only for train dataloader
-  pin_memory: false
-  num_workers: 6
 train:
   local_update_steps: 1
-  recalibrate_bn: true
+  recalibrate_bn: false
   batch_or_epoch: epoch
   optimizer:
     type: patchSGD
@@ -46,9 +39,9 @@ eval:
   best_res_update_round_wise_key: 'test_acc'
   report: ['raw']  # 'weighted_avg', 'avg', 'fairness',
 finetune:
-  before_eval: true
+  before_eval: false
   batch_or_epoch: epoch
-  recalibrate_bn: true
+  recalibrate_bn: false
   criterion_base: "eval"  # "train" or "eval"
   local_update_steps: 20
   optimizer:
