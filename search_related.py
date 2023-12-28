@@ -1,7 +1,5 @@
 import os
-import time
 import torch
-from pathlib import Path
 import thop
 import copy
 import json
@@ -15,7 +13,8 @@ from federatedscope.core.auxiliaries.scheduler_builder import get_scheduler
 
 from performance_predictor.predictor import JsonData, RFPredictor
 
-from federatedscope.contrib.loss.balanced_softmax import BalancedSoftmax
+from train_val import train_one_epoch, evaluate_one_epoch
+
 
 DEVICE = torch.device("cuda:0")
 
@@ -30,7 +29,9 @@ def sample_subnet(supernet, specs=None, arch_cfg=None, existing_archs=None, flop
         elif specs == "max":
             subnet_cfg = supernet.sample_max_subnet()
         elif specs == "mutate":
-            subnet_cfg = supernet.mutate_and_reset(arch_cfg, prob=0.2, keep_resolution=True)  # TODO(Variant): value?
+            parents = random.choices(arch_cfg, k=1)
+            parent_arch_cfg = copy.deepcopy(parents[0])
+            subnet_cfg = supernet.mutate_and_reset(parent_arch_cfg, prob=0.2, keep_resolution=True)  # TODO(Variant): value?
         elif specs == "crossover":
             parents = random.choices(arch_cfg, k=2)
             arch_cfg_A, arch_cfg_B = copy.deepcopy(parents[0]), copy.deepcopy(parents[1])
@@ -72,22 +73,22 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
     saved_infos = []
 
     # EA 初始化 population ----------------------------------------------------------------------------------------------
-
-    # 添加min_subnet到初始化的EA population中-----------------------------------------------------------------------------
-    subnet_info = sample_subnet(supernet, specs="min", flops_limits=(0, flops_limit))
-    # 构建min_subnet评估fitness
-    subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False)
-    # 保存数据
-    subnet_info.update({"init_pops": True})
-    saved_infos.append(subnet_info)
-    population.append(copy.deepcopy(subnet_info['arch_cfg']))
+    # # 添加min_subnet到初始化的EA population中-----------------------------------------------------------------------------
+    # subnet_info = sample_subnet(supernet, specs="min", flops_limits=(0, flops_limit))
+    # # 构建min_subnet评估fitness
+    # subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False)
+    # # 保存数据
+    # subnet_info.update({"init_pops": True})
+    # saved_infos.append(subnet_info)
+    # population.append(copy.deepcopy(subnet_info['arch_cfg']))
 
     # 添加其他random subnet到初始化的EA population中----------------------------------------------------------------------
-    for _ in trange(popu_size - 1):
+    for _ in trange(popu_size):
         subnet_info = sample_subnet(supernet, specs="random", flops_limits=(0, flops_limit))
         # 构建subnet评估fitness
         subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False)
         # 保存数据
+        subnet_info.update({"init_pops": True})
         saved_infos.append(subnet_info)
         population.append(copy.deepcopy(subnet_info["arch_cfg"]))  # update populations
 
@@ -112,26 +113,25 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
     for current_generation in range(max_generations):
         print(f"current_generation: {current_generation+1}")
         # 进化世代 实现mutate -------------------------------------------------------------------------------------------
-        for _ in trange(int(popu_size/4)):
-            parent_arch_cfg = copy.deepcopy(random.choices(population[:popu_size], k=1))[0]
-            subnet_info = sample_subnet(supernet, specs="mutate", arch_cfg=parent_arch_cfg,
+        for _ in trange(popu_size // 2):
+            subnet_info = sample_subnet(supernet, specs="mutate", arch_cfg=population[:popu_size],
                                         existing_archs=population, flops_limits=(0, flops_limit))
             # 利用构建的predictor预测性能，并将新生成的架构加入所有信息
             subnet_info.update({"pred_loss": predictor.scratch_predict(subnet_info["arch_cfg"])})
             # 保存数据
             saved_infos.append(subnet_info)
             population.append(copy.deepcopy(subnet_info['arch_cfg']))
-        # 进化世代 实现crossover ----------------------------------------------------------------------------------------
-        for _ in trange(int(popu_size/4)):
-            # parents = random.choices(population[:popu_size], k=2)
-            # arch_cfg_A, arch_cfg_B = copy.deepcopy(parents[0]), copy.deepcopy(parents[1])
-            subnet_info = sample_subnet(supernet, specs="crossover", arch_cfg=population[:popu_size],
-                                        existing_archs=population, flops_limits=(0, flops_limit))
-            # 利用构建的predictor预测性能，并将新生成的架构加入所有信息
-            subnet_info.update({"pred_loss": predictor.scratch_predict(subnet_info["arch_cfg"])})
-            # 保存数据
-            saved_infos.append(subnet_info)
-            population.append(copy.deepcopy(subnet_info['arch_cfg']))
+        # # 进化世代 实现crossover ----------------------------------------------------------------------------------------
+        # for _ in trange(popu_size // 4):
+        #     # parents = random.choices(population[:popu_size], k=2)
+        #     # arch_cfg_A, arch_cfg_B = copy.deepcopy(parents[0]), copy.deepcopy(parents[1])
+        #     subnet_info = sample_subnet(supernet, specs="crossover", arch_cfg=population[:popu_size],
+        #                                 existing_archs=population, flops_limits=(0, flops_limit))
+        #     # 利用构建的predictor预测性能，并将新生成的架构加入所有信息
+        #     subnet_info.update({"pred_loss": predictor.scratch_predict(subnet_info["arch_cfg"])})
+        #     # 保存数据
+        #     saved_infos.append(subnet_info)
+        #     population.append(copy.deepcopy(subnet_info['arch_cfg']))
 
         # 进化生成新的种群（排序即可） -------------------------------------------------------------------------------------
         saved_infos.sort(key=lambda x: x['pred_loss'])
@@ -193,24 +193,6 @@ def random_explore(cfg, supernet, data, finetune=False, max_trials=2000):
     return saved_infos
 
 
-def evaluate_model(cfg, model, data_loader):
-    n_sample = 0
-    n_pos = 0
-    loss = 0
-    with torch.no_grad():
-        for i, (inputs, targets) in enumerate(data_loader):
-            with autocast(enabled=cfg.use_amp):
-                inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
-                outputs = model(inputs)
-                loss += F.cross_entropy(outputs, targets, label_smoothing=0).item()
-
-            preds = torch.argmax(outputs, dim=-1)
-            n_sample += len(preds)
-            n_pos += sum(preds == targets).item()
-
-    return loss / n_sample, n_pos / n_sample
-
-
 def get_fitness(cfg, model, data, finetune=False):
     # ------------------------------------------------------------------------------------------------------------------
     evaluation_results = {}
@@ -220,7 +202,7 @@ def get_fitness(cfg, model, data, finetune=False):
     # # 利用校准后的batchnorm statistics评估模型
     # torch.optim.swa_utils.update_bn(data['train'], model, device=DEVICE)
     # model.eval()
-    # client_recalibrate_bn_loss, client_recalibrate_bn_acc = evaluate_model(cfg, model, data["test"])
+    # client_recalibrate_bn_loss, client_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
     # evaluation_results.update({'client_recalibrate_bn_loss': client_recalibrate_bn_loss,
     #                            'client_recalibrate_bn_acc': client_recalibrate_bn_acc})
 
@@ -230,7 +212,7 @@ def get_fitness(cfg, model, data, finetune=False):
     # 利用校准后的batchnorm statistics评估模型
     torch.optim.swa_utils.update_bn(data['server'], model, device=DEVICE)
     model.eval()
-    server_recalibrate_bn_loss, server_recalibrate_bn_acc = evaluate_model(cfg, model, data["test"])
+    server_recalibrate_bn_loss, server_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
     evaluation_results.update({'server_recalibrate_bn_loss': server_recalibrate_bn_loss,
                                'server_recalibrate_bn_acc': server_recalibrate_bn_acc})
 
@@ -283,7 +265,7 @@ def get_fitness(cfg, model, data, finetune=False):
             # NOTE(Variant): finetune后评估模型
             if (epoch + 1) % 5 == 0 or epoch == finetune_epoch - 1:
                 model.eval()
-                finetune_fit_loss, finetune_fit_acc = evaluate_model(cfg, model, data["test"])
+                finetune_fit_loss, finetune_fit_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
                 evaluation_results.update({f"finetune_fit{epoch+1}_loss": finetune_fit_loss, f"finetune_fit{epoch+1}_acc": finetune_fit_acc})
 
     return evaluation_results

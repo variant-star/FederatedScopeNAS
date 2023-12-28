@@ -1,8 +1,15 @@
+import os
 import copy
 import json
 import torch
+import random
+import numpy as np
 from tqdm import trange, tqdm
 
+from federatedscope.core.auxiliaries.utils import setup_seed
+
+from federatedscope.core.configs.config import global_cfg, CfgNode, CN
+from federatedscope.contrib.auxiliaries.seed_data_builder import get_seed_data
 from federatedscope.core.auxiliaries.model_builder import get_model
 
 from search_related import random_explore, evolution_search, create_and_evaluate
@@ -23,43 +30,56 @@ def update_specific_popu_infos(cfg, supernet, data, popu_json=None):
 
 
 if __name__ == '__main__':
-    from main import prepare_runner_cfgs
-    init_cfg, client_cfgs, data = prepare_runner_cfgs()
+    # from main import prepare_runner_cfgs
+    #
+    # init_cfg, client_cfgs, data = prepare_runner_cfgs()
+    #
+    # for k, v in copy.deepcopy(client_cfgs).items():
+    #     client_specific_cfg = init_cfg.clone()
+    #     client_specific_cfg.merge_from_other_cfg(client_cfgs[k])
+    #     client_cfgs[k] = client_specific_cfg
 
-    for k, v in copy.deepcopy(client_cfgs).items():
-        client_specific_cfg = init_cfg.clone()
-        client_specific_cfg.merge_from_other_cfg(client_cfgs[k])
-        client_cfgs[k] = client_specific_cfg
+    wkdir = "exp/NAS_attentive_supernet_on_tinyimagenet_lr0.1_lstep5/sub_exp_20231201170131"
+
+    client_cfgs = dict()
+    init_cfg = CN.load_cfg(open(os.path.join(wkdir, "configs", "server_config.yaml"), 'r'))
+    for cid in range(1, init_cfg.federate.client_num + 1):
+        client_cfgs[f"client_{cid}"] = CN.load_cfg(open(os.path.join(wkdir, "configs", f"client{cid}_config.yaml"), 'r'))
+
+    setup_seed(init_cfg.seed)
+
+    data, _ = get_seed_data(config=init_cfg.clone(), client_cfgs=None)
 
     supernet = get_model(init_cfg.model, None, backend="torch").to(torch.device("cuda:0"))
 
-    saved_state_dict = torch.load(init_cfg.model.pretrain)
-    if "model" in saved_state_dict:
-        saved_state_dict = saved_state_dict["model"]
-    if "state_dict" in saved_state_dict:
-        saved_state_dict = saved_state_dict["state_dict"]
+    saved_state_dict = torch.load(os.path.join(wkdir, "checkpoints", "supernet.pth"))["model"]
     supernet.load_state_dict(saved_state_dict, strict=True)
-    print("load the checkpoint from previous training!!!")
+    print("load the checkpoint from previous NAS supernet training!!!")
 
-    # 逐个client作EA search or random search（基于loss而非accuracy）------------------------------------------------------
-    client_best = {}
-    for cid in range(1, init_cfg.federate.client_num + 1):
-        saved_infos = evolution_search(client_cfgs[f"client_{cid}"], supernet, data[cid],
-                                       client_cfgs[f"client_{cid}"]['flops_limit'], cid=cid)
-        client_best.update({cid: copy.deepcopy(saved_infos[0])})
-        with open(f"{init_cfg.outdir}/client_best_infos.json", "w") as f:
-            json.dump(client_best, f, indent=4)
+    # -----------------------reset seed---------------------------------------------------------------------------------
+    # np.random.seed(0)
+    # random.seed(0)
 
-    # # 逐个client作随机搜索（仅单次随机搜索）
-    # from search_related import sample_subnet
-    # client_random = {}
+    # # 逐个client作EA search or random search（基于loss而非accuracy）------------------------------------------------------
+    # client_best = {}
     # for cid in range(1, init_cfg.federate.client_num + 1):
-    #     subnet_info = sample_subnet(supernet, specs="random",
-    #                                 flops_limits=(client_cfgs[f"client_{cid}"]['flops_limit'] - 20 * 1e6,
-    #                                               client_cfgs[f"client_{cid}"]['flops_limit']))
-    #     client_random.update({cid: copy.deepcopy(subnet_info)})
-    #     with open(f"{init_cfg.outdir}/client_random_infos.json", "w") as f:
-    #         json.dump(client_random, f, indent=4)
+    #     saved_infos = evolution_search(client_cfgs[f"client_{cid}"], supernet, data[cid],
+    #                                    client_cfgs[f"client_{cid}"]['flops_limit'], cid=cid)
+    #     client_best.update({cid: copy.deepcopy(saved_infos[0])})
+    #     with open(f"{init_cfg.outdir}/client_best_infos.json", "w") as f:
+    #         json.dump(client_best, f, indent=4)
+
+    # 逐个client作随机搜索（仅单次随机搜索）
+    from search_related import sample_subnet
+    client_random = {}
+    for cid in range(1, init_cfg.federate.client_num + 1):
+        print(f"Client_id: {cid}")
+        subnet_info = sample_subnet(supernet, specs="random",
+                                    flops_limits=(client_cfgs[f"client_{cid}"]['flops_limit'] - 20 * 1e6,
+                                                  client_cfgs[f"client_{cid}"]['flops_limit']))
+        client_random.update({cid: copy.deepcopy(subnet_info)})
+        with open(f"{init_cfg.outdir}/client_random_infos.json", "w") as f:
+            json.dump(client_random, f, indent=4)
 
 # 消融实验---------------------------------------------------------------------------------------------------------------
 #     # Server端作实验

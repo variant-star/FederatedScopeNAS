@@ -84,7 +84,7 @@ class FedAggServer(EnhanceServer):
                     state_dict = self.model.get_active_subnet(preserve_weight=True).state_dict()
                     local_model.load_state_dict(state_dict)
                     # TODO(Variant): is it necessary?
-                    torch.optim.swa_utils.update_bn(self.data['server'], local_model, device=self.device)
+                    # torch.optim.swa_utils.update_bn(self.data['server'], local_model, device=self.device)
 
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
 
@@ -92,8 +92,7 @@ class FedAggServer(EnhanceServer):
 
                 if self.state < self.total_round_num:
                     # Move to next round of training
-                    logger.info(
-                        f'----------- Starting a new training round (Round #{self.state}) -------------')
+                    logger.info(f'----------- Starting a new training round (Round #{self.state}) -------------')
                     # Clean the msg_buffer
                     self.msg_buffer['train'][self.state - 1].clear()
                     self.msg_buffer['train'][self.state] = dict()
@@ -101,16 +100,11 @@ class FedAggServer(EnhanceServer):
 
                     # Start a new training round
                     self.broadcast_model_para(msg_type='model_para',
-                                              sample_client_num=self.sample_client_num)  # TODO(Variant): 改写broadcast model para
+                                              sample_client_num=self.sample_client_num)
                     self.client_models.clear()
                 else:
                     # Final Evaluate
-                    logger.info('Server: Training is finished! Starting '
-                                'evaluation.')
-                    # self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_after_ft')  # Preform finetune evaluation in clients
-                    self.broadcast_evaluation_in_clients(
-                        msg_type='evaluate_after_ft')  # Preform finetune evaluation in clients
-
+                    logger.info('Server: Training is finished!')
             else:
                 # Receiving enough feedback in the evaluation process
                 self._merge_and_format_eval_results()

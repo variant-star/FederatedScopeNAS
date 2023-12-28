@@ -83,6 +83,9 @@ class FedMDServer(EnhanceServer):
             if not check_eval_result:
 
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
+                self.no_broadcast_evaluation_in_clients(
+                    msg_type='no_broadcast_evaluate_no_ft')  # Preform evaluation in clients
+
                 # Receiving enough feedback in the training process
                 msg_list = list()
 
@@ -101,17 +104,13 @@ class FedMDServer(EnhanceServer):
 
                 self.client_models.clear()
 
-                self.no_broadcast_evaluation_in_clients(
-                    msg_type='no_broadcast_evaluate_no_ft')  # Preform evaluation in clients
-
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
 
                 self.state += 1
 
                 if self.state < self.total_round_num:
                     # Move to next round of training
-                    logger.info(
-                        f'----------- Starting a new training round (Round #{self.state}) -------------')
+                    logger.info(f'----------- Starting a new training round (Round #{self.state}) -------------')
                     # Clean the msg_buffer
                     self.msg_buffer['train'][self.state - 1].clear()
                     self.msg_buffer['train'][self.state] = dict()
@@ -119,15 +118,10 @@ class FedMDServer(EnhanceServer):
 
                     # Start a new training round
                     self.broadcast_model_para(msg_type='model_para',
-                                              sample_client_num=self.sample_client_num)  # TODO(Variant): 改写broadcast model para
+                                              sample_client_num=self.sample_client_num)
                 else:
                     # Final Evaluate
-                    logger.info('Server: Training is finished! Starting '
-                                'evaluation.')
-                    # self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_after_ft')  # Preform finetune evaluation in clients
-                    self.broadcast_evaluation_in_clients(
-                        msg_type='evaluate_after_ft')  # Preform finetune evaluation in clients
-
+                    logger.info('Server: Training is finished!')
             else:
                 # Receiving enough feedback in the evaluation process
                 self._merge_and_format_eval_results()

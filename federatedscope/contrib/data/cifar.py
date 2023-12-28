@@ -1,3 +1,4 @@
+import os
 from ..transform_ops.ops import Cutout, RandomErase
 from ..transform_ops.autoaugment import CIFAR10Policy
 import torchvision.transforms as transforms
@@ -12,13 +13,11 @@ from federatedscope.core.auxiliaries.dataloader_builder import get_dataloader
 import copy
 
 
-def build_transforms(dataset, autoaugment=False, random_erase=False, cutout=False):
+def build_cifar_transforms(dataset, autoaugment=False, random_erase=False, cutout=False):
     if dataset.lower() == 'cifar10':
         normalize = transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))  # cifar10
-    elif dataset.lower() == "cifar100":
+    else:  # dataset.lower() == "cifar100":
         normalize = transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))  # cifar100
-    else:
-        raise ValueError
 
     train_transforms = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -34,41 +33,35 @@ def build_transforms(dataset, autoaugment=False, random_erase=False, cutout=Fals
     else:
         train_transforms.transforms.append(transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1))
 
+    if cutout:
+        train_transforms.transforms.append(Cutout(1, length=8))
+
     train_transforms.transforms.append(transforms.ToTensor())
     train_transforms.transforms.append(normalize)
-
-    if cutout:
-        cutout_length = 8
-        train_transforms.transforms.append(Cutout(1, cutout_length))
 
     val_transforms = transforms.Compose([
         transforms.ToTensor(),
         normalize,
     ])
-
     test_transforms = transforms.Compose([
         transforms.ToTensor(),
         normalize,
     ])
-
     return train_transforms, val_transforms, test_transforms
 
 
 def load_cifar_data(config, client_cfgs=None):
 
-    train_transforms, val_transforms, test_transforms = build_transforms(
+    train_transforms, val_transforms, test_transforms = build_cifar_transforms(
         config.data.type.lower(),
         autoaugment=getattr(config.data, "autoaugment", True),
         random_erase=getattr(config.data, "random_erase", False),
         cutout=getattr(config.data, "cutout", False),
     )
-
-    if config.data.type.lower() == "cifar10":
-        raw_train_dataset = datasets.CIFAR10(config.data.root, train=True, download=True, transform=train_transforms)
-        raw_test_dataset = datasets.CIFAR10(config.data.root, train=False, download=True, transform=test_transforms)
-    else:
-        raw_train_dataset = datasets.CIFAR100(config.data.root, train=True, download=True, transform=train_transforms)
-        raw_test_dataset = datasets.CIFAR100(config.data.root, train=False, download=True, transform=test_transforms)
+    raw_train_dataset = eval(f"datasets.{config.data.type.upper()}")(config.data.root, train=True, download=True,
+                                                                     transform=train_transforms)
+    raw_test_dataset = eval(f"datasets.{config.data.type.upper()}")(config.data.root, train=False, download=True,
+                                                                    transform=test_transforms)
     assert len(raw_train_dataset) == 50_000 and len(raw_test_dataset) == 10_000
 
     translator = BaseDataTranslator(config, client_cfgs)
@@ -90,8 +83,8 @@ def load_cifar_data(config, client_cfgs=None):
     bn_recalibration_dataset = dict()
     bn_recalibration_dataset['train_version'] = copy.deepcopy(server_dataset)
     bn_recalibration_dataset['train_version'].dataset.transform = train_transforms  # 若改为 test_transform， calibrate bn 性能较差
-    bn_recalibration_dataset['test_version'] = copy.deepcopy(server_dataset)
-    bn_recalibration_dataset['test_version'].dataset.transform = test_transforms
+    # bn_recalibration_dataset['test_version'] = copy.deepcopy(server_dataset)
+    # bn_recalibration_dataset['test_version'].dataset.transform = test_transforms
 
     fs_data[0] = ClientData(config, train=server_dataset, val=server_val_dataset, test=raw_test_dataset)
 
@@ -104,14 +97,13 @@ def load_cifar_data(config, client_cfgs=None):
         # fs_data[client_id].server_data = copy.deepcopy(bn_recalibration_dataset['test_version'])
         # fs_data[client_id]['server_test'] = get_dataloader(fs_data[client_id].server_test_data, config, 'server')
 
-
     return fs_data, config.clone()
 
 
-def call_cifar_data(config, client_cfgs=None):
+def call_cifar_data(config, client_cfgs=None):  # CIFAR10, CIFAR100, TinyImageNet
     if config.data.type.lower().startswith("cifar"):
         data, modified_config = load_cifar_data(config, client_cfgs)
         return data, modified_config
 
 
-register_data("cifar", call_cifar_data)
+register_data("cifar_datasets", call_cifar_data)

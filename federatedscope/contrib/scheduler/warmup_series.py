@@ -11,7 +11,7 @@ def call_warmup_scheduler(optimizer, reg_type, **kwargs):
         multiplier = kwargs.pop('multiplier', 1)
 
         max_iters = max(kwargs.get('max_iters') * multiplier, 1)  # 仅避免multiplier即local_update_step为0的情况
-        warmup_iters = kwargs.get('warmup_iters') * multiplier
+        warmup_iters = kwargs.get('warmup_iters', 0)
         warmup_factor = kwargs.get('warmup_factor', 0.001)
         clamp_lr = kwargs.get('clamp_lr', 0.)
 

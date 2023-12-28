@@ -72,7 +72,8 @@ class KEMFServer(EnhanceServer):
                 aggregated_num = self._perform_federated_aggregation()
 
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
-                self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_no_ft')  # Preform evaluation in clients
+                self.no_broadcast_evaluation_in_clients(
+                    msg_type='no_broadcast_evaluate_no_ft')  # Preform evaluation in clients
 
                 _, _, results = self.trainer.train()  # return: num_samples, model_para, results_raw
                 # save train results (train results is calculated based on ensemble models' soft logit)
@@ -88,40 +89,29 @@ class KEMFServer(EnhanceServer):
                 # save server model
                 torch.save({'round': self.state, 'model': self.model.state_dict()},
                            os.path.join(self._cfg.outdir, 'checkpoints', f"server_model.pth"))
+
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
 
                 self.state += 1
-                if self.state % self._cfg.eval.freq == 0 and self.state != \
-                        self.total_round_num:
-                    #  Evaluate
-                    logger.info(f'Server: Starting evaluation at the end '
-                                f'of round {self.state - 1}.')
-                    self.eval()
+
+                # NOTE(Variant): Clean cached client models
+                for model_idx in range(self.model_num):
+                    self.trainers[model_idx].ensemble_models.clear()
 
                 if self.state < self.total_round_num:
                     # Move to next round of training
-                    logger.info(
-                        f'----------- Starting a new training round (Round '
-                        f'#{self.state}) -------------')
+                    logger.info(f'----------- Starting a new training round (Round #{self.state}) -------------')
                     # Clean the msg_buffer
                     self.msg_buffer['train'][self.state - 1].clear()
                     self.msg_buffer['train'][self.state] = dict()
                     self.staled_msg_buffer.clear()
 
-                    # NOTE(Variant): Clean cached client models
-                    for model_idx in range(self.model_num):
-                        self.trainers[model_idx].ensemble_models.clear()
-
                     # Start a new training round
-                    self._start_new_training_round(aggregated_num)
+                    self.broadcast_model_para(msg_type='model_para',
+                                              sample_client_num=self.sample_client_num)
                 else:
                     # Final Evaluate
-                    logger.info('Server: Training is finished! Starting '
-                                'evaluation.')
-                    # self.no_broadcast_evaluation_in_clients(msg_type='no_broadcast_evaluate_after_ft')  # Preform finetune evaluation in clients
-                    self.broadcast_evaluation_in_clients(msg_type='evaluate_after_ft')  # Preform finetune evaluation in clients
-                    self.eval()
-
+                    logger.info('Server: Training is finished!')
             else:
                 # Receiving enough feedback in the evaluation process
                 self._merge_and_format_eval_results()

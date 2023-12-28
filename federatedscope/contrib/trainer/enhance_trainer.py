@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import logging
 import numpy as np
+from copy import deepcopy
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
@@ -55,6 +56,12 @@ class EnhanceTrainer(GeneralTorchTrainer):
                 self._hook_on_fit_end_for_train_mode_recalibrate_bn, 'on_fit_end'
             )
 
+        self.register_hook_in_train(self._hook_record_initialization,
+                                    trigger='on_fit_start', insert_pos=-1)
+
+        self.register_hook_in_train(self._hook_del_initialization,
+                                    trigger='on_fit_end', insert_pos=-1)
+
         # ---------------------------------------- hooks_in_eval -------------------------------------------------------
         # self.replace_hook_in_eval(
         #     self._hook_on_fit_start_init_for_evaluate,
@@ -63,6 +70,12 @@ class EnhanceTrainer(GeneralTorchTrainer):
         self.replace_hook_in_eval(
             self._hook_on_batch_forward_for_evaluate,  # normal forward, no optimizer and lr_scheduler.
             'on_batch_forward', target_hook_name='_hook_on_batch_forward')
+
+        # self.register_hook_in_eval(self._hook_record_initialization,
+        #                            trigger='on_fit_start', insert_pos=-1)
+        #
+        # self.register_hook_in_eval(self._hook_del_initialization,
+        #                            trigger='on_fit_end', insert_pos=-1)
 
         # ---------------------------------------- hooks_in_ft -------------------------------------------------------
         if self._cfg.finetune.before_eval:
@@ -73,6 +86,12 @@ class EnhanceTrainer(GeneralTorchTrainer):
                 self.register_hook_in_ft(
                     self._hook_on_fit_end_for_ft_mode_recalibrate_bn, 'on_fit_end'
                 )
+
+            self.register_hook_in_ft(self._hook_record_initialization,
+                                     trigger='on_fit_start', insert_pos=-1)
+
+            self.register_hook_in_ft(self._hook_del_initialization,
+                                     trigger='on_fit_end', insert_pos=-1)
 
         # prepare mixed precision computation
         self.ctx.scaler = GradScaler() if self.ctx.cfg.use_amp else None
@@ -180,6 +199,9 @@ class EnhanceTrainer(GeneralTorchTrainer):
                 if batch_i >= getattr(self.ctx, f"num_{self.ctx.cur_split}_batch_last_epoch") - 1:  # make changes
                     break
 
+    def _hook_record_initialization(self, ctx):
+        ctx.weight_init = deepcopy([_.data.detach() for _ in ctx.model.parameters()])
+
     def _hook_on_fit_start_init(self, ctx):
         # prepare model and optimizer
         ctx.model.to(ctx.device)
@@ -286,6 +308,9 @@ class EnhanceTrainer(GeneralTorchTrainer):
 
         results = ctx.monitor.eval(ctx)
         setattr(ctx, 'eval_metrics', results)
+
+    def _hook_del_initialization(self, ctx):
+        ctx.weight_init = None
 
     def _hook_on_fit_end_for_train_mode_recalibrate_bn(self, ctx):
         torch.optim.swa_utils.update_bn(ctx.data['server'], ctx.model, ctx.device)

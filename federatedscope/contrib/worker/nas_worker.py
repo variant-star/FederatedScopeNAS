@@ -105,43 +105,29 @@ class NASServer(EnhanceServer):  # actually, it should inherit from KEMFServer
                 # NOTE(Variant): ---------------------------------------------------------------------------------------
 
                 self.state += 1
-                if self.state % self._cfg.eval.freq == 0 and self.state != \
-                        self.total_round_num:
-                    #  Evaluate
-                    logger.info(f'Server: Starting evaluation at the end '
-                                f'of round {self.state - 1}.')
-                    self.eval_supernet(spec_subnet="max", recalibrate_bn=True)
-                    self.eval_supernet(spec_subnet="random", recalibrate_bn=True)
-                    self.eval_supernet(spec_subnet="min", recalibrate_bn=True)
-                    # Check and save
-                    self.check_and_save()  # self.broadcast_model_para -> client -> callback_funcs_for_metrics中包含check_and_save()
+
+                self.eval_supernet(spec_subnet="max", recalibrate_bn=True)
+                self.eval_supernet(spec_subnet="random", recalibrate_bn=True)
+                self.eval_supernet(spec_subnet="min", recalibrate_bn=True)
+
+                # NOTE(Variant): Clean cached client models
+                for model_idx in range(self.model_num):
+                    self.trainers[model_idx].ensemble_models.clear()  # very important!
 
                 if self.state < self.total_round_num:
                     # Move to next round of training
-                    logger.info(
-                        f'----------- Starting a new training round (Round '
-                        f'#{self.state}) -------------')
+                    logger.info(f'----------- Starting a new training round (Round #{self.state}) -------------')
                     # Clean the msg_buffer
                     self.msg_buffer['train'][self.state - 1].clear()
                     self.msg_buffer['train'][self.state] = dict()
                     self.staled_msg_buffer.clear()
 
-                    # NOTE(Variant): Clean cached client models
-                    for model_idx in range(self.model_num):
-                        self.trainers[model_idx].ensemble_models.clear()  # very important!
-
                     # Start a new training round
-                    self._start_new_training_round(aggregated_num)
+                    self.broadcast_model_para(msg_type='model_para',
+                                              sample_client_num=self.sample_client_num)
                 else:
                     # Final Evaluate
-                    logger.info('Server: Training is finished! Starting '
-                                'evaluation.')
-                    self.eval_supernet(spec_subnet="max", recalibrate_bn=True)
-                    self.eval_supernet(spec_subnet="random", recalibrate_bn=True)
-                    self.eval_supernet(spec_subnet="min", recalibrate_bn=True)
-                    # Check and save
-                    self.check_and_save()  # self.broadcast_model_para -> client -> callback_funcs_for_metrics中包含check_and_save()
-
+                    logger.info('Server: Training is finished!')
             else:
                 # Receiving enough feedback in the evaluation process
                 self._merge_and_format_eval_results()

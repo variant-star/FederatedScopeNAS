@@ -123,8 +123,13 @@ def prepare_runner_cfgs():
     cfg_opt, client_cfg_opt = parse_client_cfg(args.opts)
     init_cfg.merge_from_list(cfg_opt)
 
-    # TODO(Variant): only support CIFAR-10 or CIFAR-100
-    n_classes = 10 if init_cfg.data.type.lower() == 'cifar10' else 100
+    # TODO(Variant): only support CIFAR10 or CIFAR100 or TinyImageNet
+    if init_cfg.data.type.lower().startswith("cifar"):
+        n_classes = int(init_cfg.data.type.lower().strip("cifar"))   # 10 or 100
+    elif init_cfg.data.type.lower() == "tinyimagenet":
+        n_classes = 200
+    else:
+        raise ValueError
     init_cfg.model.n_classes = n_classes
 
     update_logger(init_cfg, clear_before_add=True)
