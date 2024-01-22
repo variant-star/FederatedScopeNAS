@@ -59,16 +59,15 @@ def distribute_hw_info(size, fmin, fmax):  # size 等同于 每个client的数�
     return client_hw_infos
 
 
-def get_clients_hardware_limits(supernet, data, client_num):
-    inputs = torch.randn(1, 3, 32, 32)
+def get_clients_hardware_limits(supernet, data, dummy_inputs, client_num):
     supernet.sample_min_subnet()
     min_subnet = supernet.get_active_subnet(preserve_weight=False)
-    min_subnet_flops, min_subnet_params = thop.profile(min_subnet, inputs=(inputs,), verbose=False)
+    min_subnet_flops, min_subnet_params = thop.profile(min_subnet, inputs=(dummy_inputs,), verbose=False)
     print(f"[MIN Subnet] FLOPs:{min_subnet_flops/1e6:.2f}M, params:{min_subnet_params/1e6:.2f}M")
 
     supernet.sample_max_subnet()
     max_subnet = supernet.get_active_subnet(preserve_weight=False)
-    max_subnet_flops, max_subnet_params = thop.profile(max_subnet, inputs=(inputs,), verbose=False)
+    max_subnet_flops, max_subnet_params = thop.profile(max_subnet, inputs=(dummy_inputs,), verbose=False)
     print(f"[MAX Subnet] FLOPs:{max_subnet_flops / 1e6:.2f}M, params:{max_subnet_params / 1e6:.2f}M")
 
     client_hw_infos = distribute_hw_info(
@@ -126,11 +125,14 @@ def prepare_runner_cfgs():
     # TODO(Variant): only support CIFAR10 or CIFAR100 or TinyImageNet
     if init_cfg.data.type.lower().startswith("cifar"):
         n_classes = int(init_cfg.data.type.lower().strip("cifar"))   # 10 or 100
+        in_resolution = 32
     elif init_cfg.data.type.lower() == "tinyimagenet":
         n_classes = 200
+        in_resolution = 56
     else:
         raise ValueError
     init_cfg.model.n_classes = n_classes
+    init_cfg.model.in_resolution = in_resolution
 
     update_logger(init_cfg, clear_before_add=True)
     setup_seed(init_cfg.seed)
@@ -168,7 +170,8 @@ def prepare_runner_cfgs():
     supernet_cfg = init_cfg.model.clone()
     supernet_cfg.type = "attentive_supernet"
     supernet = get_model(supernet_cfg, None, backend='torch')
-    client_hw_cfgs = get_clients_hardware_limits(supernet, data, client_num=init_cfg.federate.client_num)
+    dummy_inputs = torch.randn(1, 3, init_cfg.model.in_resolution, init_cfg.model.in_resolution)
+    client_hw_cfgs = get_clients_hardware_limits(supernet, data, dummy_inputs, client_num=init_cfg.federate.client_num)
     del supernet
 
     # load client_specified_hardware_infos
