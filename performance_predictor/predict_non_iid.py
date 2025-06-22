@@ -7,6 +7,7 @@ from predictor import JsonData, RFPredictor, NeuralPredictor
 from predictor import get_imbalance
 
 SUB_PATH = "../exp-public-label-train-and-search/nas_fl_lr_on_cifar100_lr0.1_lstep1/sub_exp_20231031114136"
+# SUB_PATH = "sub_exp_20231024174102"
 
 # 获取
 CLIENT_NUM = 8
@@ -19,7 +20,7 @@ if __name__ == "__main__":
     X, Y, Y_aux = {}, {}, {}
     X_train, X_test, Y_train, Y_test, Y_aux_train, Y_aux_test = {}, {}, {}, {}, {}, {}
 
-    for cid in range(CLIENT_NUM+1):  # "cid == 0" means server client.
+    for cid in range(1, CLIENT_NUM+1):  # "cid == 0" means server client.
         raw_data = JsonData(
             f"{SUB_PATH}/server_popu_infos.json" if cid == 0 else f"{SUB_PATH}/client{cid}_serverpopu_infos.json",
             imbalance_info=None)
@@ -41,7 +42,7 @@ if __name__ == "__main__":
     # build machine learning performance predictor----------------------------------------------------------------------
 
     predictor = {}
-    for cid in range(CLIENT_NUM+1):
+    for cid in range(1, CLIENT_NUM+1):
         predictor[cid] = RFPredictor(max_depth=15, max_features='auto', criterion="squared_error", random_state=0)
         predictor[cid].fit(X_train[cid], Y_train[cid])
         # Y_pred = predictor[cid].predict(X_test)
