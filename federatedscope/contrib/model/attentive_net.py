@@ -16,7 +16,7 @@ from federatedscope.core.configs.config import CN
 
 def call_attentive_net(model_config, input_shape):
     if "attentive" in model_config.type:
-        attentive_yaml = "AttentiveNAS/configs/attentive_supernet_cifar.yml"
+        attentive_yaml = f"AttentiveNAS/configs/attentive_supernet_{model_config.in_resolution}.yml"
 
         from AttentiveNAS.utils.config import setup
         cfg = setup(attentive_yaml)

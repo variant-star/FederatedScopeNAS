@@ -128,7 +128,7 @@ def prepare_runner_cfgs():
         in_resolution = 32
     elif init_cfg.data.type.lower() == "tinyimagenet":
         n_classes = 200
-        in_resolution = 56
+        in_resolution = 32
     else:
         raise ValueError
     init_cfg.model.n_classes = n_classes

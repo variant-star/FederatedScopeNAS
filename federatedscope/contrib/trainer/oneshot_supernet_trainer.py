@@ -28,7 +28,7 @@ class OneShotSupernetTrainer(EnhanceTrainer):
 
         super(OneShotSupernetTrainer, self).__init__(model, data, device, config, only_for_eval, monitor)
 
-        self.dummy_input = torch.randn(1, 3, 32, 32).to(device)
+        self.dummy_input = torch.randn(1, 3, self._cfg.model.in_resolution, self._cfg.model.in_resolution).to(device)
         self.flops_limit = self.cfg.flops_limit
 
     def _hook_on_batch_forward_for_train(self, ctx):

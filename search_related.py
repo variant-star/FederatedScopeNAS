@@ -19,9 +19,9 @@ from train_val import train_one_epoch, evaluate_one_epoch
 DEVICE = torch.device("cuda:0")
 
 
-def sample_subnet(supernet, specs=None, arch_cfg=None, existing_archs=None, flops_limits=None):
-
-    inputs = torch.randn(1, 3, 32, 32).to(DEVICE)  # for thop to compute flops
+def sample_subnet(supernet, specs=None, arch_cfg=None, existing_archs=None, flops_limits=None, dummy_inputs=None, device=DEVICE):
+    # if not dummy_inputs:
+    #     dummy_inputs = torch.randn(1, 3, 32, 32).to(device)  # for thop to compute flops
 
     while True:
         if specs == "min":
@@ -42,7 +42,7 @@ def sample_subnet(supernet, specs=None, arch_cfg=None, existing_archs=None, flop
             raise ValueError
 
         subnet = supernet.get_active_subnet(preserve_weight=False)
-        flops, params = thop.profile(subnet, inputs=(inputs,), verbose=False)
+        flops, params = thop.profile(subnet, inputs=(dummy_inputs,), verbose=False)
 
         if existing_archs is not None:
             if subnet_cfg in existing_archs:  # 若已存在该架构
@@ -56,27 +56,29 @@ def sample_subnet(supernet, specs=None, arch_cfg=None, existing_archs=None, flop
     return {"arch_cfg": subnet_cfg, "flops": flops, "params": params, "minmax": specs in ['min', "max"]}
 
 
-def create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False, inplace=True):
+def create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False, inplace=True, device=DEVICE):
     supernet.set_active_subnet(**subnet_info["arch_cfg"])
 
     subnet = supernet.get_active_subnet(preserve_weight=True)
-    evaluate_results = get_fitness(cfg, subnet, data, finetune=finetune)
+    evaluate_results = get_fitness(cfg, subnet, data, finetune=finetune, device=device)
 
     subnet_info.update(evaluate_results)  # inplace update
 
     return subnet_info
 
 
-def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_size=256, cid=0):
+def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_size=256, cid=0, device=DEVICE):
+
+    dummy_inputs = torch.randn(1, 3, cfg.model.in_resolution, cfg.model.in_resolution)
 
     population = []
     saved_infos = []
 
     # EA 初始化 population ----------------------------------------------------------------------------------------------
     # # 添加min_subnet到初始化的EA population中-----------------------------------------------------------------------------
-    # subnet_info = sample_subnet(supernet, specs="min", flops_limits=(0, flops_limit))
+    # subnet_info = sample_subnet(supernet, specs="min", flops_limits=(0, flops_limit), dummy_inputs=dummy_inputs, device=device)
     # # 构建min_subnet评估fitness
-    # subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False)
+    # subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False, device=device)
     # # 保存数据
     # subnet_info.update({"init_pops": True})
     # saved_infos.append(subnet_info)
@@ -84,9 +86,9 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
 
     # 添加其他random subnet到初始化的EA population中----------------------------------------------------------------------
     for _ in trange(popu_size):
-        subnet_info = sample_subnet(supernet, specs="random", flops_limits=(0, flops_limit))
+        subnet_info = sample_subnet(supernet, specs="random", flops_limits=(0, flops_limit), dummy_inputs=dummy_inputs, device=device)
         # 构建subnet评估fitness
-        subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False)
+        subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=False, device=device)
         # 保存数据
         subnet_info.update({"init_pops": True})
         saved_infos.append(subnet_info)
@@ -115,7 +117,7 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
         # 进化世代 实现mutate -------------------------------------------------------------------------------------------
         for _ in trange(popu_size // 2):
             subnet_info = sample_subnet(supernet, specs="mutate", arch_cfg=population[:popu_size],
-                                        existing_archs=population, flops_limits=(0, flops_limit))
+                                        existing_archs=population, flops_limits=(0, flops_limit), dummy_inputs=dummy_inputs, device=device)
             # 利用构建的predictor预测性能，并将新生成的架构加入所有信息
             subnet_info.update({"pred_loss": predictor.scratch_predict(subnet_info["arch_cfg"])})
             # 保存数据
@@ -126,7 +128,7 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
         #     # parents = random.choices(population[:popu_size], k=2)
         #     # arch_cfg_A, arch_cfg_B = copy.deepcopy(parents[0]), copy.deepcopy(parents[1])
         #     subnet_info = sample_subnet(supernet, specs="crossover", arch_cfg=population[:popu_size],
-        #                                 existing_archs=population, flops_limits=(0, flops_limit))
+        #                                 existing_archs=population, flops_limits=(0, flops_limit), dummy_inputs=dummy_inputs, device=device)
         #     # 利用构建的predictor预测性能，并将新生成的架构加入所有信息
         #     subnet_info.update({"pred_loss": predictor.scratch_predict(subnet_info["arch_cfg"])})
         #     # 保存数据
@@ -139,7 +141,7 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
 
     # 对last populations架构作精细化finetune评比，并保存相关模型作为后续retrain阶段的预训练模型 -------------------------------
     for i in trange(popu_size):
-        # saved_infos[i] = create_and_evaluate(cfg, supernet, data, saved_infos[i], finetune=False)  # TODO(Variant): 是否需finetune
+        # saved_infos[i] = create_and_evaluate(cfg, supernet, data, saved_infos[i], finetune=False, device=device)  # TODO(Variant): 是否需finetune
         saved_infos[i].update({"last_pops": True})
         # # 保存模型
         # Path(cfg.outdir + f'/client_{cid}/checkpoints/').mkdir(parents=True, exist_ok=True)
@@ -156,32 +158,34 @@ def evolution_search(cfg, supernet, data, flops_limit, max_generations=20, popu_
     return saved_infos
 
 
-def random_explore(cfg, supernet, data, finetune=False, max_trials=2000):
+def random_explore(cfg, supernet, data, finetune=False, max_trials=2000, device=DEVICE):
+
+    dummy_inputs = torch.randn(1, 3, cfg.model.in_resolution, cfg.model.in_resolution)
 
     population = []
     saved_infos = []
 
     # 添加min_subnet-----------------------------------------------------------------------------
-    subnet_info = sample_subnet(supernet, specs="min")
+    subnet_info = sample_subnet(supernet, specs="min", dummy_inputs=dummy_inputs, device=device)
     # 构建min_subnet评估fitness
-    subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune)
+    subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune, device=device)
     # 保存数据
     saved_infos.append(subnet_info)
     population.append(copy.deepcopy(subnet_info["arch_cfg"]))
 
     # 添加max_subnet-----------------------------------------------------------------------------
-    subnet_info = sample_subnet(supernet, specs="max")
+    subnet_info = sample_subnet(supernet, specs="max", dummy_inputs=dummy_inputs, device=device)
     # 构建max_subnet评估fitness
-    subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune)
+    subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune, device=device)
     # 保存数据
     saved_infos.append(subnet_info)
     population.append(copy.deepcopy(subnet_info["arch_cfg"]))
 
     # 随机采样若干架构----------------------------------------------------------------------------------------------------
     for _ in trange(max_trials - 2):
-        subnet_info = sample_subnet(supernet, specs="random", existing_archs=population)
+        subnet_info = sample_subnet(supernet, specs="random", existing_archs=population, dummy_inputs=dummy_inputs, device=device)
         # 构建subnet评估fitness
-        subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune)
+        subnet_info = create_and_evaluate(cfg, supernet, data, subnet_info, finetune=finetune, device=device)
         # 保存数据
         saved_infos.append(subnet_info)
         population.append(copy.deepcopy(subnet_info["arch_cfg"]))  # update populations
@@ -193,16 +197,16 @@ def random_explore(cfg, supernet, data, finetune=False, max_trials=2000):
     return saved_infos
 
 
-def get_fitness(cfg, model, data, finetune=False):
+def get_fitness(cfg, model, data, finetune=False, device=DEVICE):
     # ------------------------------------------------------------------------------------------------------------------
     evaluation_results = {}
     # ------------------------------------------------------------------------------------------------------------------
 
     # # NOTE(Variant): recalibrate bn, 校准batchnorm统计，设置model.eval() but batchnorm.training=True.
     # # 利用校准后的batchnorm statistics评估模型
-    # torch.optim.swa_utils.update_bn(data['train'], model, device=DEVICE)
+    # torch.optim.swa_utils.update_bn(data['train'], model, device=device)
     # model.eval()
-    # client_recalibrate_bn_loss, client_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
+    # client_recalibrate_bn_loss, client_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=device)
     # evaluation_results.update({'client_recalibrate_bn_loss': client_recalibrate_bn_loss,
     #                            'client_recalibrate_bn_acc': client_recalibrate_bn_acc})
 
@@ -210,9 +214,9 @@ def get_fitness(cfg, model, data, finetune=False):
 
     # NOTE(Variant): recalibrate bn, 校准batchnorm统计，设置model.eval() but batchnorm.training=True.
     # 利用校准后的batchnorm statistics评估模型
-    torch.optim.swa_utils.update_bn(data['server'], model, device=DEVICE)
+    torch.optim.swa_utils.update_bn(data['server'], model, device=device)
     model.eval()
-    server_recalibrate_bn_loss, server_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
+    server_recalibrate_bn_loss, server_recalibrate_bn_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=device)
     evaluation_results.update({'server_recalibrate_bn_loss': server_recalibrate_bn_loss,
                                'server_recalibrate_bn_acc': server_recalibrate_bn_acc})
 
@@ -242,7 +246,7 @@ def get_fitness(cfg, model, data, finetune=False):
 
             for i, (inputs, targets) in enumerate(data['train']):  # finetune dataloader
                 with autocast(enabled=cfg.use_amp):
-                    inputs, targets = inputs.to(DEVICE), targets.to(DEVICE)
+                    inputs, targets = inputs.to(device), targets.to(device)
                     outputs = model(inputs)
                     loss = criterion(outputs, targets)
 
@@ -265,7 +269,7 @@ def get_fitness(cfg, model, data, finetune=False):
             # NOTE(Variant): finetune后评估模型
             if (epoch + 1) % 5 == 0 or epoch == finetune_epoch - 1:
                 model.eval()
-                finetune_fit_loss, finetune_fit_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=DEVICE)
+                finetune_fit_loss, finetune_fit_acc, _ = evaluate_one_epoch(model, data["test"], use_amp=cfg.use_amp, device=device)
                 evaluation_results.update({f"finetune_fit{epoch+1}_loss": finetune_fit_loss, f"finetune_fit{epoch+1}_acc": finetune_fit_acc})
 
     return evaluation_results

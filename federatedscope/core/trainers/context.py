@@ -1,5 +1,6 @@
 import logging
 import collections
+import copy
 
 from federatedscope.core.auxiliaries.criterion_builder import get_criterion
 from federatedscope.core.auxiliaries.model_builder import \
@@ -157,8 +158,12 @@ class Context(LifecycleDict):
             self.trainable_para_names = get_trainable_para_names(self.model)
             # TODO: make `criterion` and `regularizer` @property and cached
             #  to compare whether changes happen
+            criterion_kwargs = copy.deepcopy(self.cfg.criterion)
+            criterion_kwargs.clear_aux_info()
+            criterion_kwargs = {k: v for k, v in criterion_kwargs.items() if k != "type"}
             self.criterion = get_criterion(self.cfg.criterion.type,
-                                           self.device)
+                                           self.device,
+                                           **criterion_kwargs)
             self.regularizer = get_regularizer(self.cfg.regularizer.type)
             self.grad_clip = self.cfg.grad.grad_clip
             if self.cfg.federate.process_num > 1:
@@ -175,25 +180,29 @@ class Context(LifecycleDict):
     def num_train_batch(self):
         if self.get('num_train_batch'):
             return self.get('num_train_batch')
-        return self._calculate_batch_epoch_num(mode='train')[0]
+        self['num_train_batch'] = self._calculate_batch_epoch_num(mode='train')[0]  # NOTE(Variant): is it right?
+        return self.get('num_train_batch')
 
     @property
     def num_train_batch_last_epoch(self):
         if self.get('num_train_batch_last_epoch'):
             return self.get('num_train_batch_last_epoch')
-        return self._calculate_batch_epoch_num(mode='train')[1]
+        self['num_train_batch_last_epoch'] = self._calculate_batch_epoch_num(mode='train')[1]  # NOTE(Variant): is it right?
+        return self.get('num_train_batch_last_epoch')
 
     @property
     def num_train_epoch(self):
         if self.get('num_train_epoch'):
             return self.get('num_train_epoch')
-        return self._calculate_batch_epoch_num(mode='train')[2]
+        self["num_train_epoch"] = self._calculate_batch_epoch_num(mode='train')[2]  # NOTE(Variant): is it right?
+        return self.get('num_train_epoch')
 
     @property
     def num_total_train_batch(self):
         if self.get('num_total_train_batch'):
             return self.get('num_total_train_batch')
-        return self._calculate_batch_epoch_num(mode='train')[3]
+        self["num_total_train_batch"] = self._calculate_batch_epoch_num(mode='train')[3]  # NOTE(Variant): is it right?
+        return self.get('num_total_train_batch')
 
     # Val related property, query from `cfg` if not set
     @property
@@ -221,6 +230,34 @@ class Context(LifecycleDict):
             return self.get('num_test_epoch')
         return self._calculate_batch_epoch_num(mode='test')[2]
 
+    @property
+    def num_finetune_batch(self):
+        if self.get('num_finetune_batch'):
+            return self.get('num_finetune_batch')
+        self['num_finetune_batch'] = self._calculate_batch_epoch_num(mode='finetune')[0]  # NOTE(Variant): is it right?
+        return self.get('num_finetune_batch')
+
+    @property
+    def num_finetune_batch_last_epoch(self):
+        if self.get('num_finetune_batch_last_epoch'):
+            return self.get('num_finetune_batch_last_epoch')
+        self['num_finetune_batch_last_epoch'] = self._calculate_batch_epoch_num(mode='finetune')[1]  # NOTE(Variant): is it right?
+        return self.get('num_finetune_batch_last_epoch')
+
+    @property
+    def num_finetune_epoch(self):
+        if self.get('num_finetune_epoch'):
+            return self.get('num_finetune_epoch')
+        self["num_finetune_epoch"] = self._calculate_batch_epoch_num(mode='finetune')[2]  # NOTE(Variant): is it right?
+        return self.get('num_finetune_epoch')
+
+    @property
+    def num_total_finetune_batch(self):
+        if self.get('num_total_finetune_batch'):
+            return self.get('num_total_finetune_batch')
+        self["num_total_finetune_batch"] = self._calculate_batch_epoch_num(mode='finetune')[3]  # NOTE(Variant): is it right?
+        return self.get('num_total_finetune_batch')
+
     def _calculate_batch_epoch_num(self, mode='train'):
         if self.cur_mode is not None and self.cur_mode != mode:
             logger.warning(
@@ -238,9 +275,9 @@ class Context(LifecycleDict):
         if mode in ['train', 'finetune']:
             num_batch, num_batch_last_epoch, num_epoch, num_total_batch = \
                 calculate_batch_epoch_num(
-                    self.cfg.train.local_update_steps *
+                    self.cfg[mode].local_update_steps *   # TODO(Variant): has any question here? no finetune?
                     self.cfg.grad.grad_accum_count,
-                    self.cfg.train.batch_or_epoch,
+                    self.cfg[mode].batch_or_epoch,
                     self.get(f'num_{cur_split}_data'),
                     self.cfg.dataloader.batch_size,
                     self.cfg.dataloader.drop_last)

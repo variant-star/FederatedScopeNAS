@@ -62,6 +62,7 @@ def config_args():
 
     args.lr = args.batch_size * args.lr / 64
     args.n_classes = {"cifar10": 10, "cifar100": 100, "tinyimagenet": 200}[args.data.lower()]
+    args.in_resolution = {"cifar10": 32, "cifar100": 32, "tinyimagenet": 56}[args.data.lower()]
     args.smoothing = 0. if args.data.lower() == "cifar10" else 0.1
     args.outdir = args.outdir + f'/{args.data}/'
     os.makedirs(args.outdir, exist_ok=True)
@@ -158,9 +159,11 @@ def get_dozens_of_subnets(args):
     supernet = call_attentive_net(args, input_shape=None).to(args.device)
     args.type = "attentive_subnet"
 
+    dummy_inputs = torch.randn(1, 3, args.in_resolution, args.in_resolution)
+
     sets = []
 
-    subnet_info = sample_subnet(supernet, specs="min")
+    subnet_info = sample_subnet(supernet, specs="min", dummy_inputs=dummy_inputs)
     sets.append(subnet_info)
 
     limits = [
@@ -170,10 +173,10 @@ def get_dozens_of_subnets(args):
         [115, 120], [120, 125], [125, 130], [130, 135], [135, 140]
     ]
     for i, (low, high) in enumerate(limits):
-        subnet_info = sample_subnet(supernet, specs="random", flops_limits=(low * 1e6, high * 1e6))
+        subnet_info = sample_subnet(supernet, specs="random", flops_limits=(low * 1e6, high * 1e6), dummy_inputs=dummy_inputs)
         sets.append(subnet_info)
 
-    subnet_info = sample_subnet(supernet, specs="max")
+    subnet_info = sample_subnet(supernet, specs="max", dummy_inputs=dummy_inputs)
     sets.append(subnet_info)
 
     return sets

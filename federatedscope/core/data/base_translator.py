@@ -82,18 +82,22 @@ class BaseDataTranslator:
         index = np.random.permutation(np.arange(len(dataset)))
         train_size = int(splits[0] * len(dataset))
         val_size = int(splits[1] * len(dataset))
+        if abs(sum(splits) - 1.0) < 0.0001:
+            test_size = len(dataset) - train_size - val_size
+        else:
+            test_size = int(splits[2] * len(dataset))
 
         if isinstance(dataset, Dataset):
             train_dataset = Subset(dataset, index[:train_size])
             val_dataset = Subset(dataset,
                                  index[train_size:train_size + val_size])
-            test_dataset = Subset(dataset, index[train_size + val_size:])
+            test_dataset = Subset(dataset, index[train_size + val_size:train_size + val_size + test_size])
         else:
             train_dataset = [dataset[x] for x in index[:train_size]]
             val_dataset = [
                 dataset[x] for x in index[train_size:train_size + val_size]
             ]
-            test_dataset = [dataset[x] for x in index[train_size + val_size:]]
+            test_dataset = [dataset[x] for x in index[train_size + val_size:train_size + val_size + test_size]]
         return train_dataset, val_dataset, test_dataset
 
     def split_to_client(self, train, val, test):
