@@ -1,0 +1,7 @@
+WARNING: The easy and best practise about trainer is just like federatedscope/contrib/trainer/torch_example.py, where the context manager is not necessary.
+
+WARNING: The modified context manager (federatedscope.core.trainers.context.Context) has potential bugs (relationships about mode and split.)
+
+WARNING: 'merge_from_other_cfg' will make cfg.personalized.local_update_steps = other_cfg.train.local_update_steps, why?
+
+FedAgg == heteroFedAvg
